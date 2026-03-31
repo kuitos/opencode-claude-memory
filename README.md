@@ -18,7 +18,7 @@ OpenCode writes memories → Claude Code reads them.
 ### 1. Install
 
 ```bash
-npm install -g opencode-memory-plugin
+npm install -g opencode-claude-memory
 ```
 
 This does two things:
@@ -35,7 +35,7 @@ Add the plugin to your `opencode.json`:
 ```jsonc
 // opencode.json
 {
-  "plugin": ["opencode-memory-plugin"]
+  "plugin": ["opencode-claude-memory"]
 }
 ```
 
@@ -52,7 +52,7 @@ When you exit a session, memories are automatically extracted in the background.
 ### Uninstall
 
 ```bash
-npm uninstall -g opencode-memory-plugin
+npm uninstall -g opencode-claude-memory
 ```
 
 This removes both the wrapper and the plugin. Your saved memories in `~/.claude/projects/` are **not** deleted.
