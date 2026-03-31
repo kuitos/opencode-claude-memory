@@ -30,11 +30,7 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "Publishing ${PACKAGE_NAME}@${PACKAGE_VERSION}"
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish
         if: steps.check.outputs.skip != 'true'
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
