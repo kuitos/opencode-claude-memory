@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 #
-# opencode-with-memory — Shell wrapper that runs opencode normally, then
-# automatically extracts and saves memories after the session ends.
+# opencode (memory wrapper) — Drop-in replacement that wraps the real opencode
+# binary, then automatically extracts and saves memories after the session ends.
+#
+# Install by placing this earlier in PATH than the real opencode binary.
+# The script finds the real opencode by scanning PATH and skipping itself.
 #
 # Usage:
-#   opencode-with-memory [any opencode args...]
+#   opencode [any opencode args...]
 #
 # How it works:
-#   1. Runs `opencode` with all your arguments (TUI or run mode)
-#   2. After opencode exits, finds the most recent session
-#   3. Forks that session and sends a memory extraction prompt
-#   4. The extraction runs in the background so you're not blocked
+#   1. Finds the real `opencode` binary (skipping this wrapper in PATH)
+#   2. Runs it normally with all your arguments
+#   3. After you exit, finds the most recent session
+#   4. Forks that session and sends a memory extraction prompt
+#   5. The extraction runs in the background so you're not blocked
 #
 # Requirements:
-#   - `opencode` CLI in PATH
+#   - Real `opencode` CLI reachable in PATH (after this wrapper)
 #   - `jq` for JSON parsing
 #   - The opencode-memory plugin installed (provides memory_save tool)
 #
@@ -26,6 +30,28 @@
 #
 
 set -euo pipefail
+
+# ============================================================================
+# Resolve the real opencode binary (skip this wrapper)
+# ============================================================================
+
+SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+
+find_real_opencode() {
+  local IFS=':'
+  for dir in $PATH; do
+    local candidate="$dir/opencode"
+    if [ -x "$candidate" ] && [ "$(cd "$(dirname "$candidate")" && pwd -P)/$(basename "$candidate")" != "$SELF" ]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  echo "[opencode-memory] ERROR: Cannot find real opencode binary in PATH" >&2
+  echo "[opencode-memory] Make sure opencode is installed and this wrapper is placed earlier in PATH" >&2
+  exit 1
+}
+
+REAL_OPENCODE="$(find_real_opencode)"
 
 # ============================================================================
 # Configuration
@@ -101,7 +127,7 @@ log() {
 
 get_latest_session_id() {
   local session_json
-  session_json=$(opencode session list --format json -n 1 2>/dev/null) || return 1
+  session_json=$("$REAL_OPENCODE" session list --format json -n 1 2>/dev/null) || return 1
 
   # Parse with jq if available, fallback to grep
   if command -v jq &>/dev/null; then
@@ -138,7 +164,7 @@ run_extraction() {
   log "Log file: $LOG_FILE"
 
   # Build the opencode run command
-  local cmd=(opencode run -s "$session_id" --fork)
+  local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork)
 
   if [ -n "$EXTRACT_MODEL" ]; then
     cmd+=(-m "$EXTRACT_MODEL")
@@ -164,9 +190,9 @@ run_extraction() {
 # Main
 # ============================================================================
 
-# Step 1: Run opencode with all original arguments, capture exit code
+# Step 1: Run the real opencode with all original arguments, capture exit code
 opencode_exit=0
-opencode "$@" || opencode_exit=$?
+"$REAL_OPENCODE" "$@" || opencode_exit=$?
 
 # Step 2: Check if extraction is enabled
 if [ "$EXTRACT_ENABLED" = "0" ]; then

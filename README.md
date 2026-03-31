@@ -15,62 +15,67 @@ OpenCode writes memories → Claude Code reads them.
 
 ## Quick Start
 
-### 1. Install the plugin
-
-Copy the single-file plugin to your OpenCode plugins directory:
+### 1. Install
 
 ```bash
-cp ~/.config/opencode/plugins/opencode-memory.ts ~/.config/opencode/plugins/
+npm install -g opencode-memory-plugin
 ```
 
-Or reference the multi-file source:
+This does two things:
+
+- Registers the **plugin** (memory tools + system prompt injection)
+- Places an `opencode` **wrapper** in your global bin that auto-extracts memories after each session
+
+> The wrapper is a drop-in replacement — it finds the real `opencode` binary in `PATH`, runs it normally, then triggers memory extraction in the background when you exit.
+
+### 2. Configure the plugin
+
+Add the plugin to your `opencode.json`:
 
 ```jsonc
 // opencode.json
 {
   "plugins": {
-    "memory": "~/tmp/opencode-memory-plugin"
+    "memory": "opencode-memory-plugin"
   }
 }
 ```
 
-### 2. Use manually
+### 3. Use
 
-Once installed, the AI agent can use memory tools directly:
+Just run `opencode` as usual. The memory tools are available to the AI agent:
 
 - **"Remember that I prefer terse responses"** → saves a `feedback` memory
 - **"What do you remember about me?"** → reads from memory
 - **"Forget the memory about my role"** → deletes a memory
 
-### 3. Enable auto-extraction (optional)
+When you exit a session, memories are automatically extracted in the background.
 
-Use the shell wrapper to automatically extract memories when a session ends:
+### Uninstall
 
 ```bash
-# Add to your PATH
-ln -s ~/tmp/opencode-memory-plugin/bin/opencode-with-memory /usr/local/bin/opencode-with-memory
-
-# Use instead of `opencode`
-opencode-with-memory
-
-# Or alias it
-alias oc='opencode-with-memory'
+npm uninstall -g opencode-memory-plugin
 ```
+
+This removes both the wrapper and the plugin. Your saved memories in `~/.claude/projects/` are **not** deleted.
 
 ## Auto-Extraction
 
-The `opencode-with-memory` wrapper:
+The wrapper:
 
-1. Runs `opencode` normally with all your arguments
-2. After you exit, finds the most recent session ID
-3. Forks that session and sends a memory extraction prompt
-4. The extraction runs **in the background** — you're never blocked
+1. Finds the real `opencode` binary (skips itself in `PATH`)
+2. Runs it normally with all your arguments
+3. After you exit, finds the most recent session
+4. Forks that session and sends a memory extraction prompt
+5. The extraction runs **in the background** — you're never blocked
 
 ### How it works
 
 ```
-You (exit opencode)
-  → wrapper detects exit
+You run `opencode`
+  → wrapper finds real opencode binary (skipping itself in PATH)
+  → runs real opencode with your arguments
+  → you exit
   → opencode session list --format json -n 1  (get last session)
   → opencode run -s <id> --fork "<extraction prompt>"  (background)
   → memories saved to ~/.claude/projects/<project>/memory/
@@ -144,9 +149,9 @@ This means:
 ## File Structure
 
 ```
-~/tmp/opencode-memory-plugin/
+opencode-memory/
 ├── bin/
-│   └── opencode-with-memory    # Shell wrapper for auto-extraction
+│   └── opencode                # Drop-in wrapper (finds real binary, adds memory extraction)
 ├── src/
 │   ├── index.ts                # Plugin entry point (tools + hooks)
 │   ├── memory.ts               # Memory CRUD operations
@@ -154,9 +159,6 @@ This means:
 │   └── prompt.ts               # System prompt injection
 ├── package.json
 └── tsconfig.json
-
-~/.config/opencode/plugins/
-└── opencode-memory.ts          # Single-file installed plugin (self-contained)
 ```
 
 ## Tools Reference

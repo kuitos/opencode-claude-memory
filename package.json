@@ -1,15 +1,24 @@
 {
-  "name": "opencode-memory",
-  "version": "0.2.0",
+  "name": "opencode-memory-plugin",
+  "version": "0.1.0",
   "type": "module",
   "description": "Cross-session memory plugin for OpenCode — Claude Code compatible, persistent, file-based memory",
   "main": "src/index.ts",
   "bin": {
-    "opencode-with-memory": "./bin/opencode-with-memory"
+    "opencode": "./bin/opencode"
   },
   "exports": {
     ".": "./src/index.ts"
   },
+  "files": [
+    "src",
+    "bin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kuitos/opencode-memory-plugin.git"
+  },
+  "homepage": "https://github.com/kuitos/opencode-memory-plugin#readme",
   "keywords": [
     "opencode",
     "plugin",
