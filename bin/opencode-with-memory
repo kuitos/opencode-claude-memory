@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+#
+# opencode-with-memory — Shell wrapper that runs opencode normally, then
+# automatically extracts and saves memories after the session ends.
+#
+# Usage:
+#   opencode-with-memory [any opencode args...]
+#
+# How it works:
+#   1. Runs `opencode` with all your arguments (TUI or run mode)
+#   2. After opencode exits, finds the most recent session
+#   3. Forks that session and sends a memory extraction prompt
+#   4. The extraction runs in the background so you're not blocked
+#
+# Requirements:
+#   - `opencode` CLI in PATH
+#   - `jq` for JSON parsing
+#   - The opencode-memory plugin installed (provides memory_save tool)
+#
+# Environment variables:
+#   OPENCODE_MEMORY_EXTRACT=0    — Disable auto-extraction
+#   OPENCODE_MEMORY_FOREGROUND=1 — Run extraction in foreground (for debugging)
+#   OPENCODE_MEMORY_MODEL=...    — Override model for extraction (e.g., "anthropic/claude-sonnet-4-20250514")
+#   OPENCODE_MEMORY_AGENT=...    — Override agent for extraction
+#   OPENCODE_MEMORY_DIR=...      — Override working directory for opencode
+#
+
+set -euo pipefail
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+EXTRACT_ENABLED="${OPENCODE_MEMORY_EXTRACT:-1}"
+FOREGROUND="${OPENCODE_MEMORY_FOREGROUND:-0}"
+EXTRACT_MODEL="${OPENCODE_MEMORY_MODEL:-}"
+EXTRACT_AGENT="${OPENCODE_MEMORY_AGENT:-}"
+WORKING_DIR="${OPENCODE_MEMORY_DIR:-$(pwd)}"
+
+# Lock file to prevent concurrent extractions on the same project
+LOCK_DIR="${TMPDIR:-/tmp}/opencode-memory-locks"
+mkdir -p "$LOCK_DIR"
+LOCK_FILE="$LOCK_DIR/$(echo "$WORKING_DIR" | sed 's/[^a-zA-Z0-9]/-/g').lock"
+
+# Log file for background extraction
+LOG_DIR="${TMPDIR:-/tmp}/opencode-memory-logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/extract-$(date +%Y%m%d-%H%M%S).log"
+
+# ============================================================================
+# Extraction Prompt
+# ============================================================================
+
+# Adapted from Claude Code's extraction prompt, simplified for OpenCode's
+# headless run mode. The model sees the full conversation context via --fork.
+EXTRACT_PROMPT='You are now acting as the memory extraction subagent. Review the entire conversation above and extract any information worth remembering for future sessions.
+
+## What to save
+
+Use the `memory_save` tool to persist memories. There are four types:
+
+1. **user** — Who the user is: role, expertise, preferences, communication style. Helps tailor future interactions.
+2. **feedback** — Guidance on how to work: corrections ("don'\''t do X"), confirmations ("yes, keep doing that"), approach preferences. Include *why* so edge cases can be judged.
+3. **project** — Ongoing work context: goals, deadlines, initiatives, decisions, bugs. NOT derivable from code/git. Convert relative dates to absolute.
+4. **reference** — Pointers to external resources: URLs, tool names, where to find information outside the codebase.
+
+## What NOT to save
+
+- Code patterns, architecture, file structure — derivable from the codebase
+- Git history, recent changes — use `git log`/`git blame`
+- Debugging solutions — the fix is in the code
+- Anything already in AGENTS.md / project config files
+- Ephemeral task details or current conversation context
+- Information that was already saved in a previous extraction
+
+## How to save
+
+For each memory worth saving, call `memory_save` with:
+- `file_name`: descriptive slug (e.g., `user_role`, `feedback_testing_approach`)
+- `name`: short title
+- `description`: one-line description (used for relevance matching in future sessions)
+- `type`: one of user, feedback, project, reference
+- `content`: the memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines.
+
+## Instructions
+
+1. Analyze the conversation for memorable information
+2. Check existing memories first (use `memory_list`) to avoid duplicates — update existing ones if needed
+3. Save each distinct memory as a separate entry
+4. If the conversation was trivial (e.g., just "hello" or a quick lookup), save nothing — that'\''s fine
+5. Be selective: 0-3 memories per session is typical. Quality over quantity.
+6. Do NOT save a memory about the extraction process itself.'
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+log() {
+  echo "[opencode-memory] $*" >&2
+}
+
+get_latest_session_id() {
+  local session_json
+  session_json=$(opencode session list --format json -n 1 2>/dev/null) || return 1
+
+  # Parse with jq if available, fallback to grep
+  if command -v jq &>/dev/null; then
+    echo "$session_json" | jq -r '.[0].id // empty'
+  else
+    # Rough fallback: extract first "id" value
+    echo "$session_json" | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/'
+  fi
+}
+
+acquire_lock() {
+  if [ -f "$LOCK_FILE" ]; then
+    local lock_pid
+    lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
+    if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+      log "Another extraction is already running (PID $lock_pid), skipping"
+      return 1
+    fi
+    # Stale lock — remove it
+    rm -f "$LOCK_FILE"
+  fi
+  echo $$ > "$LOCK_FILE"
+  return 0
+}
+
+release_lock() {
+  rm -f "$LOCK_FILE"
+}
+
+run_extraction() {
+  local session_id="$1"
+
+  log "Extracting memories from session $session_id..."
+  log "Log file: $LOG_FILE"
+
+  # Build the opencode run command
+  local cmd=(opencode run -s "$session_id" --fork)
+
+  if [ -n "$EXTRACT_MODEL" ]; then
+    cmd+=(-m "$EXTRACT_MODEL")
+  fi
+
+  if [ -n "$EXTRACT_AGENT" ]; then
+    cmd+=(--agent "$EXTRACT_AGENT")
+  fi
+
+  cmd+=("$EXTRACT_PROMPT")
+
+  # Execute
+  if "${cmd[@]}" >> "$LOG_FILE" 2>&1; then
+    log "Memory extraction completed successfully"
+  else
+    log "Memory extraction failed (exit code $?). Check $LOG_FILE for details"
+  fi
+
+  release_lock
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+# Step 1: Run opencode with all original arguments, capture exit code
+opencode_exit=0
+opencode "$@" || opencode_exit=$?
+
+# Step 2: Check if extraction is enabled
+if [ "$EXTRACT_ENABLED" = "0" ]; then
+  exit $opencode_exit
+fi
+
+# Step 3: Get the most recent session ID
+session_id=$(get_latest_session_id)
+
+if [ -z "$session_id" ]; then
+  log "No session found, skipping memory extraction"
+  exit $opencode_exit
+fi
+
+# Step 4: Acquire lock (prevent concurrent extractions)
+if ! acquire_lock; then
+  exit $opencode_exit
+fi
+
+# Step 5: Run extraction
+if [ "$FOREGROUND" = "1" ]; then
+  # Foreground mode (for debugging)
+  run_extraction "$session_id"
+else
+  # Background mode (default) — user isn't blocked
+  run_extraction "$session_id" &
+  disown
+  log "Memory extraction started in background (PID $!)"
+fi
+
+exit $opencode_exit

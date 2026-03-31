@@ -1,0 +1,28 @@
+{
+  "name": "opencode-memory",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Cross-session memory plugin for OpenCode — Claude Code compatible, persistent, file-based memory",
+  "main": "src/index.ts",
+  "bin": {
+    "opencode-with-memory": "./bin/opencode-with-memory"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "memory",
+    "persistent",
+    "cross-session",
+    "claude-code-compatible"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "dependencies": {
+    "zod": "^3.24.0"
+  }
+}
