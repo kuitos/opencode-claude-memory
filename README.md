@@ -24,6 +24,8 @@ Claude Code writes memory → OpenCode reads it. OpenCode writes memory → Clau
   Install + enable plugin, then keep using `opencode` as usual.
 - **Local-first, no migration**
   Memory stays as local Markdown files in the same directory Claude Code already uses.
+- **Auto-dream consolidation**
+  Periodically runs a background memory consolidation pass (Claude-style auto-dream gating).
 
 ## 🚀 Quick Start
 
@@ -35,7 +37,7 @@ npm install -g opencode-claude-memory
 
 This installs:
 - the **plugin** (memory tools + system prompt injection)
-- an `opencode` **wrapper** (auto-extracts memories after each session)
+- an `opencode` **wrapper** (runs post-session memory extraction + auto-dream consolidation)
 
 ### 2. Configure
 
@@ -52,7 +54,7 @@ This installs:
 opencode
 ```
 
-That’s it. Memory extraction runs in the background after each session.
+That’s it. Post-session memory extraction runs in the background, and auto-dream consolidation is checked with time/session gates.
 
 ## 💡 Why this exists
 
@@ -78,8 +80,10 @@ The outcome: **shared context across Claude Code and OpenCode without maintainin
 1. You run `opencode` (wrapper).
 2. Wrapper finds and launches the real OpenCode binary.
 3. You use OpenCode normally.
-4. After exit, memory extraction runs in the background.
-5. Memories are saved to Claude-compatible paths under `~/.claude/projects/`.
+4. After exit, memory extraction runs in the background (unless already written during session).
+5. Auto-dream gate is evaluated (default: at least 24h since last consolidation and 5 touched sessions).
+6. If gate passes, a background consolidation pass runs to merge/prune memories.
+7. Memories are saved to Claude-compatible paths under `~/.claude/projects/`.
 
 ### Compatibility details
 
@@ -114,22 +118,35 @@ File-based memory is transparent, local-first, easy to inspect/diff/back up, and
 
 Yes. Set `OPENCODE_MEMORY_EXTRACT=0`.
 
+### Can I disable auto-dream?
+
+Yes. Set `OPENCODE_MEMORY_AUTODREAM=0`. You can also tune gates with:
+- `OPENCODE_MEMORY_AUTODREAM_MIN_HOURS`
+- `OPENCODE_MEMORY_AUTODREAM_MIN_SESSIONS`
+
 ## 🔧 Configuration
 
 ### Environment variables
 
-- `OPENCODE_MEMORY_EXTRACT` (default `1`): set `0` to disable auto-extraction
-- `OPENCODE_MEMORY_FOREGROUND` (default `0`): set `1` to run extraction in foreground
+- `OPENCODE_MEMORY_EXTRACT` (default `1`): set `0` to disable post-session extraction
+- `OPENCODE_MEMORY_FOREGROUND` (default `0`): set `1` to run maintenance in foreground
 - `OPENCODE_MEMORY_MODEL`: override model used for extraction
 - `OPENCODE_MEMORY_AGENT`: override agent used for extraction
+- `OPENCODE_MEMORY_AUTODREAM` (default `1`): set `0` to disable auto-dream consolidation
+- `OPENCODE_MEMORY_AUTODREAM_MIN_HOURS` (default `24`): min hours between consolidation runs
+- `OPENCODE_MEMORY_AUTODREAM_MIN_SESSIONS` (default `5`): min touched sessions since last consolidation
+- `OPENCODE_MEMORY_AUTODREAM_MODEL`: override model used for auto-dream
+- `OPENCODE_MEMORY_AUTODREAM_AGENT`: override agent used for auto-dream
 
 ### Logs
 
-Extraction logs are written to `$TMPDIR/opencode-memory-logs/extract-*.log`.
+Logs are written to `$TMPDIR/opencode-memory-logs/`:
+- `extract-*.log`: post-session extraction
+- `dream-*.log`: auto-dream consolidation
 
 ### Concurrency safety
 
-A file lock prevents multiple extractions from running simultaneously on the same project. Stale locks are cleaned up automatically.
+Lock files prevent concurrent extraction/consolidation runs per project. Stale locks are cleaned up automatically.
 
 ## 📝 Memory format
 

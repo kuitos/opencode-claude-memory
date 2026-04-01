@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # opencode (memory wrapper) — Drop-in replacement that wraps the real opencode
-# binary, then automatically extracts and saves memories after the session ends.
+# binary, then runs memory maintenance tasks in the background.
 #
 # Install by placing this earlier in PATH than the real opencode binary.
 # The script finds the real opencode by scanning PATH and skipping itself.
@@ -10,23 +10,28 @@
 #   opencode [any opencode args...]
 #
 # How it works:
-#   1. Finds the real `opencode` binary (skipping this wrapper in PATH)
+#   1. Finds the real `opencode` binary (skipping this wrapper)
 #   2. Runs it normally with all your arguments
 #   3. After you exit, finds the most recent session
-#   4. Forks that session and sends a memory extraction prompt
-#   5. The extraction runs in the background so you're not blocked
+#   4. Optionally runs memory extraction (conversation -> memories)
+#   5. Optionally runs auto-dream consolidation (memory pruning/merge)
 #
 # Requirements:
 #   - Real `opencode` CLI reachable in PATH (after this wrapper)
-#   - `jq` for JSON parsing
-#   - The opencode-memory plugin installed (provides memory_save tool)
+#   - `jq` for auto-dream gate/session counting
+#   - The opencode-memory plugin installed (provides memory_* tools)
 #
 # Environment variables:
-#   OPENCODE_MEMORY_EXTRACT=0    — Disable auto-extraction
-#   OPENCODE_MEMORY_FOREGROUND=1 — Run extraction in foreground (for debugging)
-#   OPENCODE_MEMORY_MODEL=...    — Override model for extraction (e.g., "anthropic/claude-sonnet-4-20250514")
-#   OPENCODE_MEMORY_AGENT=...    — Override agent for extraction
-#   OPENCODE_MEMORY_DIR=...      — Override working directory for opencode
+#   OPENCODE_MEMORY_EXTRACT=0                 — Disable post-session extraction
+#   OPENCODE_MEMORY_FOREGROUND=1              — Run maintenance in foreground (debug)
+#   OPENCODE_MEMORY_MODEL=...                 — Extraction model override
+#   OPENCODE_MEMORY_AGENT=...                 — Extraction agent override
+#   OPENCODE_MEMORY_AUTODREAM=0               — Disable auto-dream consolidation
+#   OPENCODE_MEMORY_AUTODREAM_MIN_HOURS=24    — Min hours between auto-dream runs
+#   OPENCODE_MEMORY_AUTODREAM_MIN_SESSIONS=5  — Min touched sessions since last consolidation
+#   OPENCODE_MEMORY_AUTODREAM_MODEL=...       — Auto-dream model override
+#   OPENCODE_MEMORY_AUTODREAM_AGENT=...       — Auto-dream agent override
+#   OPENCODE_MEMORY_DIR=...                   — Override working directory for opencode
 #
 
 set -euo pipefail
@@ -61,20 +66,36 @@ EXTRACT_ENABLED="${OPENCODE_MEMORY_EXTRACT:-1}"
 FOREGROUND="${OPENCODE_MEMORY_FOREGROUND:-0}"
 EXTRACT_MODEL="${OPENCODE_MEMORY_MODEL:-}"
 EXTRACT_AGENT="${OPENCODE_MEMORY_AGENT:-}"
-WORKING_DIR="${OPENCODE_MEMORY_DIR:-$(pwd)}"
 
-# Lock file to prevent concurrent extractions on the same project
+AUTODREAM_ENABLED="${OPENCODE_MEMORY_AUTODREAM:-1}"
+AUTODREAM_MIN_HOURS="${OPENCODE_MEMORY_AUTODREAM_MIN_HOURS:-24}"
+AUTODREAM_MIN_SESSIONS="${OPENCODE_MEMORY_AUTODREAM_MIN_SESSIONS:-5}"
+AUTODREAM_SCAN_LIMIT="${OPENCODE_MEMORY_AUTODREAM_SCAN_LIMIT:-200}"
+AUTODREAM_MODEL="${OPENCODE_MEMORY_AUTODREAM_MODEL:-$EXTRACT_MODEL}"
+AUTODREAM_AGENT="${OPENCODE_MEMORY_AUTODREAM_AGENT:-$EXTRACT_AGENT}"
+AUTODREAM_STALE_LOCK_SECS=$((60 * 60))
+
+WORKING_DIR="${OPENCODE_MEMORY_DIR:-$(pwd)}"
+PROJECT_KEY="$(printf '%s' "$WORKING_DIR" | cksum | awk '{print $1}')"
+
+# Lock files (prevent concurrent work on the same project)
 LOCK_DIR="${TMPDIR:-/tmp}/opencode-memory-locks"
 mkdir -p "$LOCK_DIR"
-LOCK_FILE="$LOCK_DIR/$(echo "$WORKING_DIR" | sed 's/[^a-zA-Z0-9]/-/g').lock"
+EXTRACT_LOCK_FILE="$LOCK_DIR/${PROJECT_KEY}.extract.lock"
 
-# Log file for background extraction
+STATE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/opencode-memory"
+mkdir -p "$STATE_DIR"
+CONSOLIDATION_LOCK_FILE="$STATE_DIR/${PROJECT_KEY}.consolidate-lock"
+
+# Logs
 LOG_DIR="${TMPDIR:-/tmp}/opencode-memory-logs"
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/extract-$(date +%Y%m%d-%H%M%S).log"
+TASK_LOG_PREFIX="$(date +%Y%m%d-%H%M%S)-${PROJECT_KEY}"
+EXTRACT_LOG_FILE="$LOG_DIR/extract-${TASK_LOG_PREFIX}.log"
+AUTODREAM_LOG_FILE="$LOG_DIR/dream-${TASK_LOG_PREFIX}.log"
 
 # ============================================================================
-# Extraction Prompt
+# Prompts
 # ============================================================================
 
 # Adapted from Claude Code's extraction prompt, simplified for OpenCode's
@@ -117,6 +138,44 @@ For each memory worth saving, call `memory_save` with:
 5. Be selective: 0-3 memories per session is typical. Quality over quantity.
 6. Do NOT save a memory about the extraction process itself.'
 
+# Periodic memory consolidation inspired by Claude Code auto-dream.
+AUTODREAM_PROMPT="$(cat <<'EOF'
+You are performing an auto-dream memory consolidation pass.
+
+Goal: tighten and de-duplicate memory files so future sessions can orient faster.
+
+## Available tools
+- memory_list
+- memory_search
+- memory_read
+- memory_save
+- memory_delete
+
+## Phase 1 — Orient
+1. Use memory_list to inspect current memory inventory.
+2. Identify overlapping or stale entries that can be merged/updated/deleted.
+
+## Phase 2 — Consolidate
+1. Merge duplicates into a single stronger memory using memory_save.
+2. Rewrite vague descriptions so retrieval is easier and more precise.
+3. For feedback/project entries, ensure content is structured as:
+   - main rule/fact
+   - **Why:**
+   - **How to apply:**
+
+## Phase 3 — Prune
+1. Delete memories that are clearly obsolete, contradictory, or low-value.
+2. Keep total memory set concise and high signal.
+
+## Guardrails
+- Do NOT invent facts.
+- If confidence is low, keep existing memory instead of guessing.
+- If memory quality is already strong, make no changes and explicitly say so.
+
+Return a short summary of what you updated, merged, or removed.
+EOF
+)"
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -125,85 +184,300 @@ log() {
   echo "[opencode-memory] $*" >&2
 }
 
+is_positive_int() {
+  [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
+}
+
+if ! is_positive_int "$AUTODREAM_MIN_HOURS"; then
+  log "Invalid OPENCODE_MEMORY_AUTODREAM_MIN_HOURS=$AUTODREAM_MIN_HOURS, using default 24"
+  AUTODREAM_MIN_HOURS=24
+fi
+if ! is_positive_int "$AUTODREAM_MIN_SESSIONS"; then
+  log "Invalid OPENCODE_MEMORY_AUTODREAM_MIN_SESSIONS=$AUTODREAM_MIN_SESSIONS, using default 5"
+  AUTODREAM_MIN_SESSIONS=5
+fi
+if ! is_positive_int "$AUTODREAM_SCAN_LIMIT"; then
+  log "Invalid OPENCODE_MEMORY_AUTODREAM_SCAN_LIMIT=$AUTODREAM_SCAN_LIMIT, using default 200"
+  AUTODREAM_SCAN_LIMIT=200
+fi
+
 has_new_memories() {
-  # Check if any memory file was modified during the session
-  # Checks all projects' memory directories for files newer than the timestamp marker
+  # Check if any memory file was modified during the session.
   local mem_base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
-  
   if [ ! -d "$mem_base" ]; then
     return 1
   fi
-  
-  # Find any .md file under projects/*/memory/ newer than our timestamp
+
   local newer_files
   newer_files=$(find "$mem_base" -path "*/memory/*.md" -newer "$TIMESTAMP_FILE" 2>/dev/null | head -1)
-  
   [ -n "$newer_files" ]
-}
-
-get_latest_session_id() {
-  local session_json
-  session_json=$("$REAL_OPENCODE" session list --format json -n 1 2>/dev/null) || return 1
-
-  # Parse with jq if available, fallback to grep
-  if command -v jq &>/dev/null; then
-    echo "$session_json" | jq -r '.[0].id // empty'
-  else
-    # Rough fallback: extract first "id" value
-    echo "$session_json" | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/'
-  fi
-}
-
-acquire_lock() {
-  if [ -f "$LOCK_FILE" ]; then
-    local lock_pid
-    lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || true)
-    if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
-      log "Another extraction is already running (PID $lock_pid), skipping"
-      return 1
-    fi
-    # Stale lock — remove it
-    rm -f "$LOCK_FILE"
-  fi
-  echo $$ > "$LOCK_FILE"
-  return 0
-}
-
-release_lock() {
-  rm -f "$LOCK_FILE"
 }
 
 cleanup_timestamp() {
   rm -f "$TIMESTAMP_FILE"
 }
 
-run_extraction() {
+get_session_list_json() {
+  local limit="$1"
+  local output
+
+  if output=$("$REAL_OPENCODE" session list --format json -n "$limit" 2>/dev/null); then
+    echo "$output"
+    return 0
+  fi
+
+  if output=$("$REAL_OPENCODE" session list --format json 2>/dev/null); then
+    echo "$output"
+    return 0
+  fi
+
+  return 1
+}
+
+get_latest_session_id() {
+  local session_json
+  session_json=$(get_session_list_json 1) || return 1
+
+  # Parse with jq if available, fallback to grep.
+  if command -v jq &>/dev/null; then
+    echo "$session_json" | jq -r '.[0].id // empty'
+  else
+    echo "$session_json" | grep -o '"id"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)"/\1/'
+  fi
+}
+
+file_mtime_secs() {
+  local file="$1"
+  if [ ! -f "$file" ]; then
+    echo 0
+    return 0
+  fi
+
+  if stat -c %Y "$file" >/dev/null 2>&1; then
+    stat -c %Y "$file"
+    return 0
+  fi
+
+  stat -f %m "$file"
+}
+
+set_file_mtime_secs() {
+  local file="$1"
+  local secs="$2"
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$file" "$secs" <<'PY'
+import os
+import sys
+
+path = sys.argv[1]
+secs = int(sys.argv[2])
+os.utime(path, (secs, secs))
+PY
+    return 0
+  fi
+
+  # Best effort fallback; may not be portable across all environments.
+  touch -d "@$secs" "$file" >/dev/null 2>&1 || true
+}
+
+acquire_simple_lock() {
+  local lock_file="$1"
+  local lock_name="$2"
+
+  if [ -f "$lock_file" ]; then
+    local lock_pid
+    lock_pid=$(cat "$lock_file" 2>/dev/null || true)
+    if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+      log "Another $lock_name is already running (PID $lock_pid), skipping"
+      return 1
+    fi
+    rm -f "$lock_file"
+  fi
+
+  echo $$ > "$lock_file"
+  return 0
+}
+
+release_simple_lock() {
+  local lock_file="$1"
+  rm -f "$lock_file"
+}
+
+count_sessions_touched_since_ms() {
+  local since_ms="$1"
+  local exclude_session_id="$2"
+
+  if ! command -v jq >/dev/null 2>&1; then
+    echo ""
+    return 1
+  fi
+
+  local session_json
+  session_json=$(get_session_list_json "$AUTODREAM_SCAN_LIMIT") || {
+    echo ""
+    return 1
+  }
+
+  echo "$session_json" | jq -r --argjson since "$since_ms" --arg exclude "$exclude_session_id" '
+    [ .[]
+      | select((.id // "") != $exclude)
+      | select(((.time.updated // .time.created // 0) | tonumber) > $since)
+    ] | length
+  '
+}
+
+CONSOLIDATION_PRIOR_MTIME=0
+
+try_acquire_consolidation_lock() {
+  local path="$CONSOLIDATION_LOCK_FILE"
+  local now mtime holder age
+
+  now=$(date +%s)
+  mtime=0
+  holder=""
+
+  if [ -f "$path" ]; then
+    mtime=$(file_mtime_secs "$path")
+    holder=$(cat "$path" 2>/dev/null || true)
+    age=$((now - mtime))
+
+    if [ "$age" -lt "$AUTODREAM_STALE_LOCK_SECS" ] && [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+      log "Auto-dream lock held by live PID $holder (${age}s old), skipping"
+      return 1
+    fi
+  fi
+
+  mkdir -p "$(dirname "$path")"
+  echo $$ > "$path"
+
+  local verify
+  verify=$(cat "$path" 2>/dev/null || true)
+  if [ "$verify" != "$$" ]; then
+    return 1
+  fi
+
+  CONSOLIDATION_PRIOR_MTIME="$mtime"
+  return 0
+}
+
+rollback_consolidation_lock() {
+  local prior_mtime="$1"
+  local path="$CONSOLIDATION_LOCK_FILE"
+
+  if [ "$prior_mtime" -eq 0 ]; then
+    rm -f "$path"
+    return 0
+  fi
+
+  : > "$path"
+  set_file_mtime_secs "$path" "$prior_mtime"
+}
+
+run_extraction_if_needed() {
   local session_id="$1"
+  local memory_written_during_session="$2"
+
+  if [ "$EXTRACT_ENABLED" = "0" ]; then
+    return 0
+  fi
+
+  if [ "$memory_written_during_session" = "1" ]; then
+    log "Main agent already wrote memories during session, skipping extraction"
+    return 0
+  fi
+
+  if ! acquire_simple_lock "$EXTRACT_LOCK_FILE" "memory extraction"; then
+    return 0
+  fi
 
   log "Extracting memories from session $session_id..."
-  log "Log file: $LOG_FILE"
+  log "Extraction log: $EXTRACT_LOG_FILE"
 
-  # Build the opencode run command
   local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork)
-
   if [ -n "$EXTRACT_MODEL" ]; then
     cmd+=(-m "$EXTRACT_MODEL")
   fi
-
   if [ -n "$EXTRACT_AGENT" ]; then
     cmd+=(--agent "$EXTRACT_AGENT")
   fi
-
   cmd+=("$EXTRACT_PROMPT")
 
-  # Execute
-  if "${cmd[@]}" >> "$LOG_FILE" 2>&1; then
+  if "${cmd[@]}" >> "$EXTRACT_LOG_FILE" 2>&1; then
     log "Memory extraction completed successfully"
   else
-    log "Memory extraction failed (exit code $?). Check $LOG_FILE for details"
+    local code=$?
+    log "Memory extraction failed (exit code $code). Check $EXTRACT_LOG_FILE for details"
   fi
 
-  release_lock
+  release_simple_lock "$EXTRACT_LOCK_FILE"
+}
+
+run_autodream_if_needed() {
+  local session_id="$1"
+
+  if [ "$AUTODREAM_ENABLED" = "0" ]; then
+    return 0
+  fi
+
+  if ! command -v jq >/dev/null 2>&1; then
+    log "jq not found, skipping auto-dream (requires JSON session parsing)"
+    return 0
+  fi
+
+  local last_at now hours_since since_ms touched_count
+  last_at=$(file_mtime_secs "$CONSOLIDATION_LOCK_FILE")
+  now=$(date +%s)
+
+  hours_since=$(((now - last_at) / 3600))
+  if [ "$hours_since" -lt "$AUTODREAM_MIN_HOURS" ]; then
+    return 0
+  fi
+
+  since_ms=$((last_at * 1000))
+  touched_count=$(count_sessions_touched_since_ms "$since_ms" "$session_id" || true)
+  if [ -z "$touched_count" ]; then
+    log "Unable to inspect touched sessions, skipping auto-dream"
+    return 0
+  fi
+
+  if [ "$touched_count" -lt "$AUTODREAM_MIN_SESSIONS" ]; then
+    return 0
+  fi
+
+  if ! try_acquire_consolidation_lock; then
+    return 0
+  fi
+
+  log "Auto-dream firing (${hours_since}h since last consolidation, ${touched_count} sessions touched)"
+  log "Auto-dream log: $AUTODREAM_LOG_FILE"
+
+  local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork)
+  if [ -n "$AUTODREAM_MODEL" ]; then
+    cmd+=(-m "$AUTODREAM_MODEL")
+  fi
+  if [ -n "$AUTODREAM_AGENT" ]; then
+    cmd+=(--agent "$AUTODREAM_AGENT")
+  fi
+  cmd+=("$AUTODREAM_PROMPT")
+
+  if "${cmd[@]}" >> "$AUTODREAM_LOG_FILE" 2>&1; then
+    log "Auto-dream consolidation completed successfully"
+    # Keep lock mtime at "now" to represent last consolidated timestamp.
+  else
+    local code=$?
+    log "Auto-dream consolidation failed (exit code $code). Rolling back gate timestamp"
+    rollback_consolidation_lock "$CONSOLIDATION_PRIOR_MTIME"
+    return 0
+  fi
+}
+
+run_post_session_tasks() {
+  local session_id="$1"
+  local memory_written_during_session="$2"
+
+  run_extraction_if_needed "$session_id" "$memory_written_during_session"
+  run_autodream_if_needed "$session_id"
 }
 
 # ============================================================================
@@ -217,45 +491,36 @@ TIMESTAMP_FILE=$(mktemp)
 opencode_exit=0
 "$REAL_OPENCODE" "$@" || opencode_exit=$?
 
-# Step 2: Check if extraction is enabled
-if [ "$EXTRACT_ENABLED" = "0" ]; then
+# Step 2: If no maintenance task is enabled, exit early
+if [ "$EXTRACT_ENABLED" = "0" ] && [ "$AUTODREAM_ENABLED" = "0" ]; then
   cleanup_timestamp
   exit $opencode_exit
 fi
 
 # Step 3: Get the most recent session ID
-session_id=$(get_latest_session_id)
-
+session_id=$(get_latest_session_id || true)
 if [ -z "$session_id" ]; then
-  log "No session found, skipping memory extraction"
+  log "No session found, skipping post-session memory maintenance"
   cleanup_timestamp
   exit $opencode_exit
 fi
 
-# Step 3.5: Check if memories were already written during the session
+# Step 4: Check whether main session already wrote memory files
+memory_written_during_session=0
 if has_new_memories; then
-  log "Main agent already wrote memories during session, skipping extraction"
-  cleanup_timestamp
-  exit $opencode_exit
+  memory_written_during_session=1
 fi
 
-# Step 4: Acquire lock (prevent concurrent extractions)
-if ! acquire_lock; then
-  cleanup_timestamp
-  exit $opencode_exit
-fi
+# Timestamp file is no longer needed after the check above.
+cleanup_timestamp
 
-# Step 5: Run extraction
+# Step 5: Run tasks (foreground for debug, background by default)
 if [ "$FOREGROUND" = "1" ]; then
-  # Foreground mode (for debugging)
-  run_extraction "$session_id"
-  cleanup_timestamp
+  run_post_session_tasks "$session_id" "$memory_written_during_session"
 else
-  # Background mode (default) — user isn't blocked
-  run_extraction "$session_id" &
+  run_post_session_tasks "$session_id" "$memory_written_during_session" &
   disown
-  log "Memory extraction started in background (PID $!)"
-  cleanup_timestamp
+  log "Post-session memory maintenance started in background (PID $!)"
 fi
 
 exit $opencode_exit
