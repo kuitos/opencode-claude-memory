@@ -1,6 +1,6 @@
 <div align="center">
 
-# Claude Code-compatible memory for OpenCode
+# 🧠 Claude Code-compatible memory for OpenCode
 
 **Make OpenCode and Claude Code share the same memory — zero config, local-first, and no migration required.**
 
