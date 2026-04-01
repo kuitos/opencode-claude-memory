@@ -76,7 +76,14 @@ AUTODREAM_AGENT="${OPENCODE_MEMORY_AUTODREAM_AGENT:-$EXTRACT_AGENT}"
 AUTODREAM_STALE_LOCK_SECS=$((60 * 60))
 
 WORKING_DIR="${OPENCODE_MEMORY_DIR:-$(pwd)}"
-PROJECT_KEY="$(printf '%s' "$WORKING_DIR" | cksum | awk '{print $1}')"
+
+# Scope lock files at project root granularity (not per-subdirectory).
+PROJECT_SCOPE_DIR="$WORKING_DIR"
+if git -C "$WORKING_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
+  PROJECT_SCOPE_DIR="$(git -C "$WORKING_DIR" rev-parse --show-toplevel 2>/dev/null || echo "$WORKING_DIR")"
+fi
+
+PROJECT_KEY="$(printf '%s' "$PROJECT_SCOPE_DIR" | cksum | awk '{print $1}')"
 
 # Lock files (prevent concurrent work on the same project)
 LOCK_DIR="${TMPDIR:-/tmp}/opencode-memory-locks"
@@ -261,6 +268,13 @@ file_mtime_secs() {
   stat -f %m "$file"
 }
 
+# Claude-style lock/mtime semantics:
+# - lock file CONTENT (PID) = current holder
+# - lock file MTIME = last successful consolidation timestamp
+read_last_consolidated_at_secs() {
+  file_mtime_secs "$CONSOLIDATION_LOCK_FILE"
+}
+
 set_file_mtime_secs() {
   local file="$1"
   local secs="$2"
@@ -332,6 +346,9 @@ CONSOLIDATION_PRIOR_MTIME=0
 try_acquire_consolidation_lock() {
   local path="$CONSOLIDATION_LOCK_FILE"
   local now mtime holder age
+
+  # Returns prior mtime via CONSOLIDATION_PRIOR_MTIME so callers can rollback
+  # on failure (preserving last successful consolidation time semantics).
 
   now=$(date +%s)
   mtime=0
@@ -426,7 +443,7 @@ run_autodream_if_needed() {
   fi
 
   local last_at now hours_since since_ms touched_count
-  last_at=$(file_mtime_secs "$CONSOLIDATION_LOCK_FILE")
+  last_at=$(read_last_consolidated_at_secs)
   now=$(date +%s)
 
   hours_since=$(((now - last_at) / 3600))

@@ -146,7 +146,7 @@ Logs are written to `$TMPDIR/opencode-memory-logs/`:
 
 ### Concurrency safety
 
-Lock files prevent concurrent extraction/consolidation runs per project. Stale locks are cleaned up automatically.
+Lock files prevent concurrent extraction/consolidation runs per project root. Stale locks are cleaned up automatically.
 
 ## 📝 Memory format
 
