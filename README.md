@@ -38,7 +38,7 @@ opencode-memory install   # one-time: installs shell hook
 
 This installs:
 - The **plugin** — memory tools + system prompt injection
-- The `opencode-memory` **CLI** — wraps opencode with post-session extraction + auto-dream consolidation
+- The `opencode-memory` **CLI** — wraps opencode with automatic memory extraction + auto-dream consolidation
 - A **shell hook** — defines an `opencode()` function in your `.zshrc`/`.bashrc` that delegates to `opencode-memory`
 
 ### 2. Configure
@@ -56,7 +56,7 @@ This installs:
 opencode
 ```
 
-That’s it. Post-session memory extraction runs in the background, and auto-dream consolidation is checked with time/session gates.
+That’s it. Memory extraction runs in the background after each session, and auto-dream consolidation is checked with time/session gates.
 
 To uninstall:
 
@@ -154,7 +154,7 @@ Yes. Set `OPENCODE_MEMORY_AUTODREAM=0`. You can also tune gates with:
 
 ### Environment variables
 
-- `OPENCODE_MEMORY_EXTRACT` (default `1`): set `0` to disable post-session extraction
+- `OPENCODE_MEMORY_EXTRACT` (default `1`): set `0` to disable automatic memory extraction
 - `OPENCODE_MEMORY_FOREGROUND` (default `0`): set `1` to run maintenance in foreground
 - `OPENCODE_MEMORY_MODEL`: override model used for extraction
 - `OPENCODE_MEMORY_AGENT`: override agent used for extraction
@@ -167,7 +167,7 @@ Yes. Set `OPENCODE_MEMORY_AUTODREAM=0`. You can also tune gates with:
 ### Logs
 
 Logs are written to `$TMPDIR/opencode-memory-logs/`:
-- `extract-*.log`: post-session extraction
+- `extract-*.log`: automatic memory extraction
 - `dream-*.log`: auto-dream consolidation
 
 ### Concurrency safety
