@@ -31,11 +31,13 @@ Claude Code writes memory → OpenCode reads it. OpenCode writes memory → Clau
 
 ```bash
 npm install -g opencode-claude-memory
+opencode-memory install   # one-time: installs shell hook
 ```
 
 This installs:
-- the **plugin** (memory tools + system prompt injection)
-- an `opencode` **wrapper** (auto-extracts memories after each session)
+- The **plugin** — memory tools + system prompt injection
+- The `opencode-memory` **CLI** — wraps opencode with post-session memory extraction
+- A **shell hook** — defines an `opencode()` function in your `.zshrc`/`.bashrc` that delegates to `opencode-memory`
 
 ### 2. Configure
 
@@ -53,6 +55,15 @@ opencode
 ```
 
 That’s it. Memory extraction runs in the background after each session.
+
+To uninstall:
+
+```bash
+opencode-memory uninstall   # removes shell hook from .zshrc/.bashrc
+npm uninstall -g opencode-claude-memory
+```
+
+This removes the shell hook, the CLI, and the plugin. Your saved memories in `~/.claude/projects/` are **not** deleted.
 
 ## 💡 Why this exists
 
@@ -75,11 +86,23 @@ The outcome: **shared context across Claude Code and OpenCode without maintainin
 
 ## ⚙️ How it works
 
-1. You run `opencode` (wrapper).
-2. Wrapper finds and launches the real OpenCode binary.
-3. You use OpenCode normally.
-4. After exit, memory extraction runs in the background.
-5. Memories are saved to Claude-compatible paths under `~/.claude/projects/`.
+```mermaid
+graph LR
+    A[You run opencode] --> B[Shell hook calls opencode-memory]
+    B --> C[opencode-memory finds real binary]
+    C --> D[Runs opencode normally]
+    D --> E[You exit]
+    E --> F[Fork session + extract memories]
+    F --> G[Memories saved to ~/.claude/projects/]
+```
+
+The shell hook defines an `opencode()` function that delegates to `opencode-memory`:
+
+1. Shell function intercepts `opencode` command (higher priority than PATH)
+2. `opencode-memory` finds the real `opencode` binary in PATH
+3. Runs it with all your arguments
+4. After you exit, forks the session with a memory extraction prompt
+5. Extraction runs **in the background** — you're never blocked
 
 ### Compatibility details
 
