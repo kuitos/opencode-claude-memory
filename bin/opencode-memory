@@ -177,6 +177,14 @@ AUTODREAM_STALE_LOCK_SECS=$((60 * 60))
 
 WORKING_DIR="${OPENCODE_MEMORY_DIR:-$(pwd)}"
 
+TMP_BASE_DIR="${TMPDIR:-/tmp}"
+while [ "$TMP_BASE_DIR" != "/" ] && [ "${TMP_BASE_DIR%/}" != "$TMP_BASE_DIR" ]; do
+  TMP_BASE_DIR="${TMP_BASE_DIR%/}"
+done
+if [ -z "$TMP_BASE_DIR" ]; then
+  TMP_BASE_DIR="/"
+fi
+
 # Scope lock files at project root granularity (not per-subdirectory).
 PROJECT_SCOPE_DIR="$WORKING_DIR"
 if git -C "$WORKING_DIR" rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -186,7 +194,7 @@ fi
 PROJECT_KEY="$(printf '%s' "$PROJECT_SCOPE_DIR" | cksum | awk '{print $1}')"
 
 # Lock files (prevent concurrent work on the same project)
-LOCK_DIR="${TMPDIR:-/tmp}/opencode-memory-locks"
+LOCK_DIR="$TMP_BASE_DIR/opencode-memory-locks"
 mkdir -p "$LOCK_DIR"
 EXTRACT_LOCK_FILE="$LOCK_DIR/${PROJECT_KEY}.extract.lock"
 
@@ -195,7 +203,7 @@ mkdir -p "$STATE_DIR"
 CONSOLIDATION_LOCK_FILE="$STATE_DIR/${PROJECT_KEY}.consolidate-lock"
 
 # Logs
-LOG_DIR="${TMPDIR:-/tmp}/opencode-memory-logs"
+LOG_DIR="$TMP_BASE_DIR/opencode-memory-logs"
 mkdir -p "$LOG_DIR"
 TASK_LOG_PREFIX="$(date +%Y%m%d-%H%M%S)-${PROJECT_KEY}"
 EXTRACT_LOG_FILE="$LOG_DIR/extract-${TASK_LOG_PREFIX}.log"
