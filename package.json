@@ -2,7 +2,7 @@
   "name": "opencode-claude-memory",
   "version": "0.0.0-semantically-released",
   "type": "module",
-  "description": "Cross-session memory plugin for OpenCode — Claude Code compatible, persistent, file-based memory",
+  "description": "Claude Code-compatible memory compatibility layer for OpenCode — zero config, local-first, no migration",
   "main": "src/index.ts",
   "bin": {
     "opencode": "./bin/opencode"
