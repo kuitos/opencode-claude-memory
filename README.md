@@ -71,11 +71,13 @@ Worktrees of the same repo share the same memory directory
 
 ```bash
 npm install -g opencode-claude-memory
+opencode-memory install   # one-time: installs shell hook
 ```
 
 This installs:
 - The **plugin** — memory tools + system prompt injection
-- An `opencode` **wrapper** — auto-extracts memories after each session
+- The `opencode-memory` **CLI** — wraps opencode with post-session memory extraction
+- A **shell hook** — defines an `opencode()` function in your `.zshrc`/`.bashrc` that delegates to `opencode-memory`
 
 ### 2. Configure
 
@@ -104,10 +106,11 @@ When you exit, memories are extracted in the background — zero blocking.
 <summary>🗑️ Uninstall</summary>
 
 ```bash
+opencode-memory uninstall   # removes shell hook from .zshrc/.bashrc
 npm uninstall -g opencode-claude-memory
 ```
 
-This removes the wrapper and the plugin. Your saved memories in `~/.claude/projects/` are **not** deleted.
+This removes the shell hook, the CLI, and the plugin. Your saved memories in `~/.claude/projects/` are **not** deleted.
 
 </details>
 
@@ -115,20 +118,21 @@ This removes the wrapper and the plugin. Your saved memories in `~/.claude/proje
 
 ```mermaid
 graph LR
-    A[You run opencode] --> B[Wrapper finds real binary]
-    B --> C[Runs opencode normally]
-    C --> D[You exit]
-    D --> E[Get latest session ID]
+    A[You run opencode] --> B[Shell hook calls opencode-memory]
+    B --> C[opencode-memory finds real binary]
+    C --> D[Runs opencode normally]
+    D --> E[You exit]
     E --> F[Fork session + extract memories]
     F --> G[Memories saved to ~/.claude/projects/]
 ```
 
-The wrapper is a drop-in replacement that:
+The shell hook defines an `opencode()` function that delegates to `opencode-memory`:
 
-1. Scans `PATH` to find the real `opencode` binary (skipping itself)
-2. Runs it with all your arguments
-3. After you exit, forks the session with a memory extraction prompt
-4. Extraction runs **in the background** — you're never blocked
+1. Shell function intercepts `opencode` command (higher priority than PATH)
+2. `opencode-memory` finds the real `opencode` binary in PATH
+3. Runs it with all your arguments
+4. After you exit, forks the session with a memory extraction prompt
+5. Extraction runs **in the background** — you're never blocked
 
 ### What "1:1 Replica" Means
 

@@ -1,23 +1,25 @@
 #!/usr/bin/env bash
 #
-# opencode (memory wrapper) — Drop-in replacement that wraps the real opencode
-# binary, then automatically extracts and saves memories after the session ends.
+# opencode-memory — Wrapper for OpenCode with automatic memory extraction.
 #
-# Install by placing this earlier in PATH than the real opencode binary.
-# The script finds the real opencode by scanning PATH and skipping itself.
+# Installs a shell hook (function) that intercepts the `opencode` command,
+# then wraps the real binary with post-session memory extraction.
 #
-# Usage:
-#   opencode [any opencode args...]
+# Subcommands:
+#   opencode-memory install    — Install shell hook to ~/.zshrc or ~/.bashrc
+#   opencode-memory uninstall  — Remove shell hook
+#   opencode-memory [args...]  — Run opencode with memory extraction
 #
 # How it works:
-#   1. Finds the real `opencode` binary (skipping this wrapper in PATH)
-#   2. Runs it normally with all your arguments
-#   3. After you exit, finds the most recent session
-#   4. Forks that session and sends a memory extraction prompt
-#   5. The extraction runs in the background so you're not blocked
+#   1. Shell hook defines `opencode()` function that delegates to `opencode-memory`
+#   2. `opencode-memory` finds the real `opencode` binary in PATH
+#   3. Runs it normally with all your arguments
+#   4. After you exit, finds the most recent session
+#   5. Forks that session and sends a memory extraction prompt
+#   6. The extraction runs in the background so you're not blocked
 #
 # Requirements:
-#   - Real `opencode` CLI reachable in PATH (after this wrapper)
+#   - Real `opencode` CLI reachable in PATH
 #   - `jq` for JSON parsing
 #   - The opencode-memory plugin installed (provides memory_save tool)
 #
@@ -32,23 +34,93 @@
 set -euo pipefail
 
 # ============================================================================
-# Resolve the real opencode binary (skip this wrapper)
+# Shell Hook Management
 # ============================================================================
 
-SELF="$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")"
+HOOK_START_MARKER='# >>> opencode-memory auto-initialization >>>'
+HOOK_END_MARKER='# <<< opencode-memory auto-initialization <<<'
+
+detect_shell_rc() {
+  if [ -f "$HOME/.zshrc" ]; then
+    echo "$HOME/.zshrc"
+  elif [ -f "$HOME/.bashrc" ]; then
+    echo "$HOME/.bashrc"
+  else
+    echo "$HOME/.zshrc"
+  fi
+}
+
+install_hook() {
+  local rc_file
+  rc_file=$(detect_shell_rc)
+
+  if grep -qF "$HOOK_START_MARKER" "$rc_file" 2>/dev/null; then
+    echo "[opencode-memory] Hook already installed in $rc_file"
+    return 0
+  fi
+
+  cat >> "$rc_file" << 'HOOK'
+
+# >>> opencode-memory auto-initialization >>>
+opencode() {
+  command opencode-memory "$@"
+}
+# <<< opencode-memory auto-initialization <<<
+HOOK
+
+  echo "[opencode-memory] Shell hook installed in $rc_file"
+  echo "[opencode-memory] Restart your shell or run: source $rc_file"
+}
+
+uninstall_hook() {
+  local rc_file
+  rc_file=$(detect_shell_rc)
+
+  if ! grep -qF "$HOOK_START_MARKER" "$rc_file" 2>/dev/null; then
+    echo "[opencode-memory] Hook not found in $rc_file"
+    return 0
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp)
+  awk -v start="$HOOK_START_MARKER" -v end="$HOOK_END_MARKER" '
+    $0 == start { skip=1; next }
+    $0 == end   { skip=0; next }
+    !skip
+  ' "$rc_file" > "$tmp_file"
+
+  mv "$tmp_file" "$rc_file"
+  echo "[opencode-memory] Shell hook removed from $rc_file"
+  echo "[opencode-memory] Restart your shell or run: source $rc_file"
+}
+
+# Handle subcommands before any opencode resolution
+case "${1:-}" in
+  install)
+    install_hook
+    exit 0
+    ;;
+  uninstall)
+    uninstall_hook
+    exit 0
+    ;;
+esac
+
+# ============================================================================
+# Resolve the real opencode binary
+# ============================================================================
 
 find_real_opencode() {
-  local IFS=':'
-  for dir in $PATH; do
-    local candidate="$dir/opencode"
-    if [ -x "$candidate" ] && [ "$(cd "$(dirname "$candidate")" && pwd -P)/$(basename "$candidate")" != "$SELF" ]; then
-      echo "$candidate"
-      return 0
-    fi
-  done
-  echo "[opencode-memory] ERROR: Cannot find real opencode binary in PATH" >&2
-  echo "[opencode-memory] Make sure opencode is installed and this wrapper is placed earlier in PATH" >&2
-  exit 1
+  # Since this script is named `opencode-memory` (not `opencode`),
+  # `command -v opencode` finds the real binary without ambiguity.
+  local real
+  real=$(command -v opencode 2>/dev/null) || true
+  if [ -z "$real" ] || [ ! -x "$real" ]; then
+    echo "[opencode-memory] ERROR: Cannot find opencode binary in PATH" >&2
+    echo "[opencode-memory] Make sure opencode is installed: https://opencode.ai" >&2
+    exit 1
+  fi
+  echo "$real"
 }
 
 REAL_OPENCODE="$(find_real_opencode)"
@@ -129,15 +201,15 @@ has_new_memories() {
   # Check if any memory file was modified during the session
   # Checks all projects' memory directories for files newer than the timestamp marker
   local mem_base="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
-  
+
   if [ ! -d "$mem_base" ]; then
     return 1
   fi
-  
+
   # Find any .md file under projects/*/memory/ newer than our timestamp
   local newer_files
   newer_files=$(find "$mem_base" -path "*/memory/*.md" -newer "$TIMESTAMP_FILE" 2>/dev/null | head -1)
-  
+
   [ -n "$newer_files" ]
 }
 

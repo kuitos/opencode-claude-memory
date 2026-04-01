@@ -5,7 +5,7 @@
   "description": "Cross-session memory plugin for OpenCode — Claude Code compatible, persistent, file-based memory",
   "main": "src/index.ts",
   "bin": {
-    "opencode": "./bin/opencode"
+    "opencode-memory": "./bin/opencode-memory"
   },
   "exports": {
     ".": "./src/index.ts"
