@@ -33,11 +33,13 @@ Claude Code writes memory → OpenCode reads it. OpenCode writes memory → Clau
 
 ```bash
 npm install -g opencode-claude-memory
+opencode-memory install   # one-time: installs shell hook
 ```
 
 This installs:
-- the **plugin** (memory tools + system prompt injection)
-- an `opencode` **wrapper** (runs post-session memory extraction + auto-dream consolidation)
+- The **plugin** — memory tools + system prompt injection
+- The `opencode-memory` **CLI** — wraps opencode with post-session extraction + auto-dream consolidation
+- A **shell hook** — defines an `opencode()` function in your `.zshrc`/`.bashrc` that delegates to `opencode-memory`
 
 ### 2. Configure
 
@@ -55,6 +57,15 @@ opencode
 ```
 
 That’s it. Post-session memory extraction runs in the background, and auto-dream consolidation is checked with time/session gates.
+
+To uninstall:
+
+```bash
+opencode-memory uninstall   # removes shell hook from .zshrc/.bashrc
+npm uninstall -g opencode-claude-memory
+```
+
+This removes the shell hook, the CLI, and the plugin. Your saved memories in `~/.claude/projects/` are **not** deleted.
 
 ## 💡 Why this exists
 
@@ -77,13 +88,28 @@ The outcome: **shared context across Claude Code and OpenCode without maintainin
 
 ## ⚙️ How it works
 
-1. You run `opencode` (wrapper).
-2. Wrapper finds and launches the real OpenCode binary.
-3. You use OpenCode normally.
-4. After exit, memory extraction runs in the background (unless already written during session).
-5. Auto-dream gate is evaluated (default: at least 24h since last consolidation and 5 touched sessions).
-6. If gate passes, a background consolidation pass runs to merge/prune memories.
-7. Memories are saved to Claude-compatible paths under `~/.claude/projects/`.
+```mermaid
+graph LR
+    A[You run opencode] --> B[Shell hook calls opencode-memory]
+    B --> C[opencode-memory finds real binary]
+    C --> D[Runs opencode normally]
+    D --> E[You exit]
+    E --> F[Extract memories if needed]
+    F --> G[Evaluate auto-dream gate]
+    G --> H[Consolidate memories if gate passes]
+    H --> I[Memories saved to ~/.claude/projects/]
+```
+
+The shell hook defines an `opencode()` function that delegates to `opencode-memory`:
+
+1. Shell function intercepts `opencode` command (higher priority than PATH)
+2. `opencode-memory` finds the real `opencode` binary in PATH
+3. Runs it with all your arguments
+4. After you exit, it checks whether the session already wrote memory files
+5. If needed, it forks the session with a memory extraction prompt
+6. It evaluates the auto-dream gate (default: at least 24h since last consolidation and 5 touched sessions)
+7. If the gate passes, it runs a background consolidation pass to merge/prune memories
+8. Maintenance runs **in the background** unless `OPENCODE_MEMORY_FOREGROUND=1`
 
 ### Compatibility details
 

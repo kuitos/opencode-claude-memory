@@ -6,7 +6,7 @@ OpenCode plugin that replicates Claude Code's persistent memory system. TypeScri
 
 ```
 .
-├── bin/opencode         # Bash wrapper: post-session extraction + auto-dream consolidation via --fork
+├── bin/opencode-memory  # Bash wrapper: shell hook install + post-session extraction + auto-dream consolidation
 ├── src/
 │   ├── index.ts         # Plugin entry: MemoryPlugin export, 5 tools + system prompt hook
 │   ├── memory.ts        # CRUD: save/delete/list/search/read + MEMORY.md index management
@@ -26,7 +26,8 @@ OpenCode plugin that replicates Claude Code's persistent memory system. TypeScri
 | Fix path resolution or worktree sharing | `src/paths.ts` — `getMemoryDir()`, `findCanonicalGitRoot()` |
 | Modify what the agent sees about memory | `src/prompt.ts` — `buildMemorySystemPrompt()` |
 | Change which memories are auto-recalled | `src/recall.ts` — `recallRelevantMemories()` |
-| Fix post-session extraction | `bin/opencode` — bash wrapper |
+| Fix post-session extraction | `bin/opencode-memory` — bash wrapper |
+| Fix shell hook install/uninstall | `bin/opencode-memory` — `install`/`uninstall` subcommands |
 
 ## Critical Coupling
 
@@ -91,6 +92,7 @@ git push origin main
 
 - Memory directory is `~/.claude/projects/<sanitizePath(canonicalGitRoot)>/memory/` — shared with Claude Code bidirectionally
 - `sanitizePath()` + `djb2Hash()` are exact copies from Claude Code source to guarantee byte-identical paths
-- The bash wrapper (`bin/opencode`) uses `mktemp` timestamp comparison to detect if the main agent already wrote memories — if so, extraction is skipped
+- The bash wrapper (`bin/opencode-memory`) uses `mktemp` timestamp comparison to detect if the main agent already wrote memories — if so, extraction is skipped
+- Shell hook is installed via `opencode-memory install`, which writes an `opencode()` function to `~/.zshrc` or `~/.bashrc` — shell functions take priority over PATH binaries
 - Auto-dream gate state is tracked with a per-project consolidation lock file under `~/.claude/opencode-memory/`
 - `package-lock.json` is gitignored (Bun runtime, not npm)
