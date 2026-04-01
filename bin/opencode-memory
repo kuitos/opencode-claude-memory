@@ -41,13 +41,26 @@ HOOK_START_MARKER='# >>> opencode-memory auto-initialization >>>'
 HOOK_END_MARKER='# <<< opencode-memory auto-initialization <<<'
 
 detect_shell_rc() {
-  if [ -f "$HOME/.zshrc" ]; then
-    echo "$HOME/.zshrc"
-  elif [ -f "$HOME/.bashrc" ]; then
-    echo "$HOME/.bashrc"
-  else
-    echo "$HOME/.zshrc"
-  fi
+  local shell_name
+  shell_name="$(basename "${SHELL:-}")"
+
+  case "$shell_name" in
+    zsh)
+      echo "$HOME/.zshrc"
+      ;;
+    bash)
+      echo "$HOME/.bashrc"
+      ;;
+    *)
+      if [ -f "$HOME/.zshrc" ]; then
+        echo "$HOME/.zshrc"
+      elif [ -f "$HOME/.bashrc" ]; then
+        echo "$HOME/.bashrc"
+      else
+        echo "$HOME/.zshrc"
+      fi
+      ;;
+  esac
 }
 
 install_hook() {
@@ -72,17 +85,11 @@ HOOK
   echo "[opencode-memory] Restart your shell or run: source $rc_file"
 }
 
-uninstall_hook() {
-  local rc_file
-  rc_file=$(detect_shell_rc)
-
-  if ! grep -qF "$HOOK_START_MARKER" "$rc_file" 2>/dev/null; then
-    echo "[opencode-memory] Hook not found in $rc_file"
-    return 0
-  fi
-
+remove_hook_from_rc() {
+  local rc_file="$1"
   local tmp_file
   tmp_file=$(mktemp)
+
   awk -v start="$HOOK_START_MARKER" -v end="$HOOK_END_MARKER" '
     $0 == start { skip=1; next }
     $0 == end   { skip=0; next }
@@ -90,8 +97,29 @@ uninstall_hook() {
   ' "$rc_file" > "$tmp_file"
 
   mv "$tmp_file" "$rc_file"
-  echo "[opencode-memory] Shell hook removed from $rc_file"
-  echo "[opencode-memory] Restart your shell or run: source $rc_file"
+}
+
+uninstall_hook() {
+  local removed=0
+  local rc_file
+
+  for rc_file in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    [ -f "$rc_file" ] || continue
+
+    if grep -qF "$HOOK_START_MARKER" "$rc_file" 2>/dev/null; then
+      remove_hook_from_rc "$rc_file"
+      echo "[opencode-memory] Shell hook removed from $rc_file"
+      removed=1
+    fi
+  done
+
+  if [ "$removed" -eq 0 ]; then
+    rc_file=$(detect_shell_rc)
+    echo "[opencode-memory] Hook not found in $rc_file"
+    return 0
+  fi
+
+  echo "[opencode-memory] Restart your shell or run: source <your rc file>"
 }
 
 # Handle subcommands before any opencode resolution
