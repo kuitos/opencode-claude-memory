@@ -26,6 +26,7 @@
 # Environment variables:
 #   OPENCODE_MEMORY_EXTRACT=0                 — Disable post-session extraction
 #   OPENCODE_MEMORY_FOREGROUND=1              — Run maintenance in foreground (debug)
+#   OPENCODE_MEMORY_TERMINAL_LOG=1|0          — Force-enable/disable terminal logs (default: foreground only)
 #   OPENCODE_MEMORY_MODEL=...                 — Extraction model override
 #   OPENCODE_MEMORY_AGENT=...                 — Extraction agent override
 #   OPENCODE_MEMORY_AUTODREAM=0               — Disable auto-dream consolidation
@@ -164,6 +165,7 @@ REAL_OPENCODE="$(find_real_opencode)"
 
 EXTRACT_ENABLED="${OPENCODE_MEMORY_EXTRACT:-1}"
 FOREGROUND="${OPENCODE_MEMORY_FOREGROUND:-0}"
+LOG_ENABLED="${OPENCODE_MEMORY_TERMINAL_LOG:-}"
 EXTRACT_MODEL="${OPENCODE_MEMORY_MODEL:-}"
 EXTRACT_AGENT="${OPENCODE_MEMORY_AGENT:-}"
 
@@ -295,13 +297,32 @@ EOF
 # Helper Functions
 # ============================================================================
 
+should_log() {
+  if [ -n "$LOG_ENABLED" ]; then
+    [ "$LOG_ENABLED" = "1" ]
+    return $?
+  fi
+
+  [ "$FOREGROUND" = "1" ]
+}
+
 log() {
+  should_log || return 0
   echo "[opencode-memory] $*" >&2
 }
 
 is_positive_int() {
   [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ]
 }
+
+is_bool_flag() {
+  [ "$1" = "0" ] || [ "$1" = "1" ]
+}
+
+if [ -n "$LOG_ENABLED" ] && ! is_bool_flag "$LOG_ENABLED"; then
+  echo "[opencode-memory] Invalid OPENCODE_MEMORY_TERMINAL_LOG=$LOG_ENABLED, expected 0 or 1; defaulting to foreground-only logging" >&2
+  LOG_ENABLED=""
+fi
 
 if ! is_positive_int "$AUTODREAM_MIN_HOURS"; then
   log "Invalid OPENCODE_MEMORY_AUTODREAM_MIN_HOURS=$AUTODREAM_MIN_HOURS, using default 24"

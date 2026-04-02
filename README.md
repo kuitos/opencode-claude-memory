@@ -110,6 +110,7 @@ The shell hook defines an `opencode()` function that delegates to `opencode-memo
 6. It evaluates the auto-dream gate (default: at least 24h since last consolidation and 5 touched sessions)
 7. If the gate passes, it runs a background consolidation pass to merge/prune memories
 8. Maintenance runs **in the background** unless `OPENCODE_MEMORY_FOREGROUND=1`
+9. Terminal maintenance logs are shown in foreground mode by default, or can be forced on/off with `OPENCODE_MEMORY_TERMINAL_LOG=1|0`
 
 ### Compatibility details
 
@@ -156,6 +157,7 @@ Yes. Set `OPENCODE_MEMORY_AUTODREAM=0`. You can also tune gates with:
 
 - `OPENCODE_MEMORY_EXTRACT` (default `1`): set `0` to disable automatic memory extraction
 - `OPENCODE_MEMORY_FOREGROUND` (default `0`): set `1` to run maintenance in foreground
+- `OPENCODE_MEMORY_TERMINAL_LOG` (default `foreground-only`): set `1` to force terminal logs on, `0` to force them off
 - `OPENCODE_MEMORY_MODEL`: override model used for extraction
 - `OPENCODE_MEMORY_AGENT`: override agent used for extraction
 - `OPENCODE_MEMORY_AUTODREAM` (default `1`): set `0` to disable auto-dream consolidation
@@ -169,6 +171,8 @@ Yes. Set `OPENCODE_MEMORY_AUTODREAM=0`. You can also tune gates with:
 Logs are written to `$TMPDIR/opencode-memory-logs/`:
 - `extract-*.log`: automatic memory extraction
 - `dream-*.log`: auto-dream consolidation
+
+By default, terminal log lines are only printed when maintenance runs in foreground (`OPENCODE_MEMORY_FOREGROUND=1`). Background runs stay quiet unless you explicitly set `OPENCODE_MEMORY_TERMINAL_LOG=1`.
 
 ### Concurrency safety
 
