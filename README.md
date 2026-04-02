@@ -65,6 +65,12 @@ opencode-memory uninstall   # removes shell hook from .zshrc/.bashrc
 npm uninstall -g opencode-claude-memory
 ```
 
+To print the wrapper package version:
+
+```bash
+opencode-memory self -v
+```
+
 This removes the shell hook, the CLI, and the plugin. Your saved memories in `~/.claude/projects/` are **not** deleted.
 
 ## 💡 Why this exists

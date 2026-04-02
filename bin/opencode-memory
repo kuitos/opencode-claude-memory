@@ -8,6 +8,7 @@
 # Subcommands:
 #   opencode-memory install    — Install shell hook to ~/.zshrc or ~/.bashrc
 #   opencode-memory uninstall  — Remove shell hook
+#   opencode-memory self -v    — Print the wrapper package version
 #   opencode-memory [args...]  — Run opencode with post-session memory maintenance
 #
 # How it works:
@@ -38,6 +39,22 @@
 #
 
 set -euo pipefail
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PACKAGE_JSON="$SCRIPT_DIR/../package.json"
+
+print_wrapper_version() {
+  local version
+
+  version=$(awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }' "$PACKAGE_JSON")
+
+  if [ -z "$version" ]; then
+    echo "[opencode-memory] ERROR: Cannot read package version from $PACKAGE_JSON" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$version"
+}
 
 # ============================================================================
 # Shell Hook Management
@@ -137,6 +154,14 @@ case "${1:-}" in
   uninstall)
     uninstall_hook
     exit 0
+    ;;
+  self)
+    case "${2:-}" in
+      -v|--version|version)
+        print_wrapper_version
+        exit 0
+        ;;
+    esac
     ;;
 esac
 
