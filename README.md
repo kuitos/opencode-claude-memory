@@ -174,7 +174,7 @@ Yes. Set `OPENCODE_MEMORY_AUTODREAM=0`. You can also tune gates with:
 
 ### Logs
 
-Logs are written to `/tmp/opencode-claude-memory/<project-hash>/`:
+Logs are written to `$TMPDIR/opencode-memory-logs/`:
 - `extract-*.log`: automatic memory extraction
 - `dream-*.log`: auto-dream consolidation
 

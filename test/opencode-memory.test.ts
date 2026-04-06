@@ -1,11 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "fs"
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
-import { dirname, join } from "path"
+import { join } from "path"
 import { spawnSync } from "child_process"
 
 const tempRoots: string[] = []
-const tempLogDirs = new Set<string>()
 const scriptPath = join(process.cwd(), "bin", "opencode-memory")
 
 function makeTempRoot(): string {
@@ -19,26 +18,6 @@ function writeExecutable(filePath: string, content: string): void {
   chmodSync(filePath, 0o755)
 }
 
-function rememberLogDirFromPath(logPath: string): void {
-  tempLogDirs.add(dirname(logPath))
-}
-
-function findRecentExtractLog(startedAt: number): string {
-  const logRoot = join("/tmp", "opencode-claude-memory")
-  const projectDirs = readdirSync(logRoot).map((entry) => join(logRoot, entry))
-
-  const extractLogs = projectDirs.flatMap((dir) =>
-    readdirSync(dir)
-      .filter((name) => name.startsWith("extract-"))
-      .map((name) => join(dir, name)),
-  )
-
-  const recentLog = extractLogs.find((logPath) => statSync(logPath).mtimeMs >= startedAt)
-  expect(recentLog).toBeDefined()
-
-  return recentLog ?? ""
-}
-
 afterEach(() => {
   while (tempRoots.length > 0) {
     const root = tempRoots.pop()
@@ -46,15 +25,10 @@ afterEach(() => {
       rmSync(root, { recursive: true, force: true })
     }
   }
-
-  for (const logDir of tempLogDirs) {
-    rmSync(logDir, { recursive: true, force: true })
-  }
-  tempLogDirs.clear()
 })
 
 describe("opencode-memory wrapper", () => {
-  test("writes extraction logs under a stable per-project /tmp directory", () => {
+  test("normalizes TMPDIR before composing extraction log paths", () => {
     const root = makeTempRoot()
     const fakeBin = join(root, "bin")
     const homeDir = join(root, "home")
@@ -86,7 +60,6 @@ exit 0
 `,
     )
 
-    const startedAt = Date.now()
     const result = spawnSync("bash", [scriptPath, "--help"], {
       cwd: root,
       encoding: "utf-8",
@@ -109,10 +82,7 @@ exit 0
     expect(logPathMatch).not.toBeNull()
 
     const logPath = logPathMatch?.[1].trim() ?? ""
-    rememberLogDirFromPath(logPath)
-    expect(logPath).toMatch(/^\/tmp\/opencode-claude-memory\/[^/]+\/extract-/)
-    expect(statSync(logPath).mtimeMs).toBeGreaterThanOrEqual(startedAt)
-    expect(logPath).toContain("/extract-")
+    expect(logPath.startsWith(join(root, "tmp", "opencode-memory-logs", "extract-"))).toBe(true)
     expect(existsSync(logPath)).toBe(true)
     expect(readFileSync(logPath, "utf-8")).toContain("extraction ok")
   })
@@ -149,7 +119,6 @@ exit 0
 `,
     )
 
-    const startedAt = Date.now()
     const result = spawnSync("bash", [scriptPath, "--help"], {
       cwd: root,
       encoding: "utf-8",
@@ -168,8 +137,11 @@ exit 0
     expect(result.status).toBe(0)
     expect(result.stderr).toBe("")
 
-    const logPath = findRecentExtractLog(startedAt)
-    rememberLogDirFromPath(logPath)
+    const logDir = join(root, "tmp", "opencode-memory-logs")
+    const logFiles = readdirSync(logDir)
+    expect(logFiles).toHaveLength(1)
+
+    const logPath = join(logDir, logFiles[0] ?? "")
     expect(readFileSync(logPath, "utf-8")).toContain("extraction ok")
   })
 })
