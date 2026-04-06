@@ -9,10 +9,19 @@ OpenCode plugin that replicates Claude Code's persistent memory system. TypeScri
 ├── bin/opencode-memory  # Bash wrapper: shell hook install + post-session extraction + auto-dream consolidation
 ├── src/
 │   ├── index.ts         # Plugin entry: MemoryPlugin export, 5 tools + system prompt hook
-│   ├── memory.ts        # CRUD: save/delete/list/search/read + MEMORY.md index management
+│   ├── memory.ts        # CRUD: save/delete/list/search/read + MEMORY.md index management + truncateEntrypoint
+│   ├── memoryScan.ts    # Recursive memory directory scanner: MemoryHeader[], frontmatter parsing, manifest formatting
 │   ├── paths.ts         # Path resolution + security: ~/.claude/projects/<hash>/memory/
-│   ├── prompt.ts        # System prompt builder: type instructions + index + recalled content
-│   └── recall.ts        # Smart recall: keyword scoring, mtime fallback, truncation, age warnings
+│   ├── prompt.ts        # System prompt builder: type instructions + index + recalled content (aligned with Claude Code memoryTypes.ts)
+│   └── recall.ts        # Smart recall: keyword scoring via scanMemoryFiles, mtime fallback, truncation, age warnings
+├── test/
+│   ├── integration.test.ts       # End-to-end lifecycle: save→list→search→read→recall→delete
+│   ├── memory.test.ts            # Unit tests for memory.ts (truncateEntrypoint, CRUD, index)
+│   ├── memoryScan.test.ts        # Unit tests for memoryScan.ts (scan, frontmatter, manifest)
+│   ├── prompt.test.ts            # Unit tests for prompt.ts (buildMemorySystemPrompt)
+│   ├── recall.test.ts            # Unit tests for recall.ts (scoring, recall, formatting)
+│   ├── opencode-memory.test.ts   # Bash wrapper tests (TMPDIR normalization, log toggle)
+│   └── github-actions-ci.test.ts # CI workflow smoke test
 ├── .releaserc           # semantic-release config
 └── tsconfig.json        # moduleResolution: bundler, types: bun-types
 ```
@@ -26,6 +35,7 @@ OpenCode plugin that replicates Claude Code's persistent memory system. TypeScri
 | Fix path resolution or worktree sharing | `src/paths.ts` — `getMemoryDir()`, `findCanonicalGitRoot()` |
 | Modify what the agent sees about memory | `src/prompt.ts` — `buildMemorySystemPrompt()` |
 | Change which memories are auto-recalled | `src/recall.ts` — `recallRelevantMemories()` |
+| Scan memory directory / build manifest | `src/memoryScan.ts` — `scanMemoryFiles()`, `formatMemoryManifest()` |
 | Fix post-session extraction | `bin/opencode-memory` — bash wrapper |
 | Fix shell hook install/uninstall | `bin/opencode-memory` — `install`/`uninstall` subcommands |
 
@@ -35,6 +45,8 @@ OpenCode plugin that replicates Claude Code's persistent memory system. TypeScri
 paths.ts ──exports constants + validateMemoryFileName──► memory.ts
 memory.ts ──exports listMemories + MemoryEntry──────────► recall.ts
 memory.ts + paths.ts ──exports readIndex, getMemoryDir──► prompt.ts
+memoryScan.ts ──exports scanMemoryFiles, MemoryHeader───► recall.ts
+memoryScan.ts ──imports getMemoryDir, ENTRYPOINT_NAME───► paths.ts
 ALL ────────────────────────────────────────────────────► index.ts
 ```
 
@@ -45,7 +57,7 @@ If you rename or change exports in `paths.ts` or `memory.ts`, check all downstre
 - **ESM `.js` imports**: All TypeScript imports use `.js` extension (`import { foo } from "./bar.js"`)
 - **No linter/formatter**: No eslintrc, prettierrc — no enforced style
 - **No build**: `main` and `exports` in package.json point to `src/index.ts` directly
-- **No tests**: No test framework configured
+- **Tests via Bun**: `bun test` runs all `test/*.test.ts` files
 - **Silent catch blocks**: Intentional — file operations fail gracefully (file may not exist)
 - **`@opencode-ai/plugin`** is a peerDependency, `bun-types` provides Node globals
 
@@ -80,7 +92,9 @@ If you rename or change exports in `paths.ts` or `memory.ts`, check all downstre
 
 ```bash
 # No build needed — raw TS consumed by OpenCode
-# No test suite
+
+# Run tests
+bun test
 
 # Release: push to main triggers semantic-release → npm publish
 git push origin main
@@ -96,3 +110,16 @@ git push origin main
 - Shell hook is installed via `opencode-memory install`, which writes an `opencode()` function to `~/.zshrc` or `~/.bashrc` — shell functions take priority over PATH binaries
 - Auto-dream gate state is tracked with a per-project consolidation lock file under `~/.claude/opencode-memory/`
 - `package-lock.json` is gitignored (Bun runtime, not npm)
+
+## Notes on Claude Code alignment
+
+Core modules (`memory.ts`, `memoryScan.ts`, `recall.ts`, `prompt.ts`) are ported from Claude Code's `src/memdir/` directory:
+
+| This project | Claude Code source |
+|---|---|
+| `memoryScan.ts` | `memoryScan.ts` — recursive scan + frontmatter header parsing |
+| `recall.ts` | `findRelevantMemories.ts` — adapted for keyword scoring (no LLM side-query) |
+| `prompt.ts` | `memoryTypes.ts` + `memdir.ts` — prompt sections, type taxonomy, truncation |
+| `memory.ts` `truncateEntrypoint()` | `memdir.ts` `truncateEntrypointContent()` — uses `.length` not `Buffer.byteLength` |
+
+The `recall.ts` module uses heuristic keyword scoring instead of Claude Code's `sideQuery()` LLM selection, since the plugin environment has no equivalent capability.
