@@ -195,6 +195,23 @@ describe("listMemories", () => {
     const fileNames = entries.map((e) => e.fileName)
     expect(fileNames).not.toContain("MEMORY.md")
   })
+
+  test("keeps public listing flat and hides nested memory files", () => {
+    const repo = makeTempGitRepo()
+    const memDir = getMemoryDir(repo)
+
+    saveMemory(repo, "top_level", "Top Level", "Visible memory", "user", "Visible content")
+    mkdirSync(join(memDir, "nested"), { recursive: true })
+    writeFileSync(
+      join(memDir, "nested", "child.md"),
+      "---\nname: Nested Child\ndescription: Hidden from flat API\ntype: user\n---\n\nNested content\n",
+      "utf-8",
+    )
+
+    const entries = listMemories(repo)
+    expect(entries).toHaveLength(1)
+    expect(entries[0]!.fileName).toBe("top_level.md")
+  })
 })
 
 describe("searchMemories", () => {

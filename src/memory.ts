@@ -77,23 +77,22 @@ export function listMemories(worktree: string): MemoryEntry[] {
 
   let files: string[]
   try {
-    files = (readdirSync(memDir, { recursive: true, encoding: "utf-8" }) as string[])
-      .filter((f: string) => f.endsWith(".md") && basename(f) !== ENTRYPOINT_NAME)
+    files = readdirSync(memDir, { encoding: "utf-8" })
+      .filter((f) => f.endsWith(".md") && f !== ENTRYPOINT_NAME)
       .sort()
       .slice(0, MAX_MEMORY_FILES)
   } catch {
     return entries
   }
 
-  for (const relativePath of files) {
-    const filePath = join(memDir, relativePath)
-    const fileName = basename(relativePath)
+  for (const fileName of files) {
+    const filePath = join(memDir, fileName)
     try {
       const rawContent = readFileSync(filePath, "utf-8")
       const { frontmatter, content } = parseFrontmatter(rawContent)
       entries.push({
         filePath,
-        fileName: relativePath,
+        fileName,
         name: frontmatter.name ?? fileName.replace(/\.md$/, ""),
         description: frontmatter.description ?? "",
         type: parseMemoryType(frontmatter.type) ?? "user",
