@@ -12,31 +12,180 @@ import {
 } from "./memory.js"
 import { getMemoryDir } from "./paths.js"
 
+// Per-turn derived state — overwritten each time messages.transform fires.
+// This replaces the old process-global session Maps so that compact naturally
+// resets both alreadySurfaced and recentTools (the messages shrink after compact,
+// so the derived state shrinks with them).
+type TurnContext = {
+  query?: string
+  alreadySurfaced: Set<string>
+  recentTools: string[]
+}
+
+const turnContextBySession = new Map<string, TurnContext>()
+
+function shouldIgnoreMemoryContext(query: string | undefined): boolean {
+  if (process.env.OPENCODE_MEMORY_IGNORE === "1") return true
+  if (!query) return false
+
+  const normalized = query.toLowerCase()
+  return (
+    /(ignore|don't use|do not use|without|skip)\s+(the\s+)?memory/.test(normalized) ||
+    /memory\s+(should be|must be)?\s*ignored/.test(normalized)
+  )
+}
+
+function extractUserQuery(message: unknown): string | undefined {
+  if (!message || typeof message !== "object") return undefined
+
+  if ("content" in message) {
+    const content = (message as { content?: unknown }).content
+    if (typeof content === "string") return content
+    if (content !== undefined) return JSON.stringify(content)
+  }
+
+  if ("parts" in message) {
+    const parts = (message as { parts?: unknown }).parts
+    if (Array.isArray(parts)) {
+      const text = parts
+        .map((part) => {
+          if (!part || typeof part !== "object") return ""
+          return typeof (part as { text?: unknown }).text === "string"
+            ? (part as { text: string }).text
+            : ""
+        })
+        .filter(Boolean)
+        .join("\n")
+        .trim()
+      if (text) return text
+    }
+  }
+
+  return undefined
+}
+
+function getLastUserQuery(messages: Array<{ info?: { role?: unknown; sessionID?: unknown }; parts?: unknown }>): {
+  query?: string
+  sessionID?: string
+} {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message?.info?.role !== "user") continue
+
+    const query = extractUserQuery(message)
+    const sessionID = typeof message.info?.sessionID === "string" ? message.info.sessionID : undefined
+    return { query, sessionID }
+  }
+
+  return {}
+}
+
+function isAutoMemoryPart(part: unknown): boolean {
+  if (!part || typeof part !== "object") return false
+  return typeof (part as { text?: unknown }).text === "string" &&
+    (part as { text: string }).text.includes("# Auto Memory")
+}
+
+// Parses "### <name> (<type>)" headers from the ## Recalled Memories section
+// of system prompts. After compaction old system messages disappear, so
+// the returned set naturally shrinks — no manual reset needed.
+function extractSurfacedMemoryKeys(systemText: string): Set<string> {
+  const keys = new Set<string>()
+  const recalledSection = systemText.indexOf("## Recalled Memories")
+  if (recalledSection === -1) return keys
+
+  const headerPattern = /^### (.+?) \((\w+)\)/gm
+  const section = systemText.slice(recalledSection)
+  for (let match = headerPattern.exec(section); match !== null; match = headerPattern.exec(section)) {
+    keys.add(`${match[1]}|${match[2]}`)
+  }
+  return keys
+}
+
+// Only completed tools — matches Claude Code's collectRecentSuccessfulTools().
+function extractRecentTools(
+  messages: Array<{ info?: { role?: unknown }; parts?: unknown[] }>,
+): string[] {
+  const tools: string[] = []
+  const seen = new Set<string>()
+  for (const message of messages) {
+    if (!message.parts || !Array.isArray(message.parts)) continue
+    for (const part of message.parts) {
+      if (!part || typeof part !== "object") continue
+      const p = part as { type?: string; tool?: string; state?: { status?: string } }
+      if (p.type !== "tool" || !p.tool) continue
+      if (p.state?.status !== "completed") continue
+      if (seen.has(p.tool)) continue
+      seen.add(p.tool)
+      tools.push(p.tool)
+    }
+  }
+  return tools
+}
+
 export const MemoryPlugin: Plugin = async ({ worktree }) => {
   getMemoryDir(worktree)
 
   return {
-    "experimental.chat.system.transform": async (_input, output) => {
-      let query: string | undefined
-      if (_input && typeof _input === "object") {
-        const messages = (_input as { messages?: unknown }).messages
-        if (Array.isArray(messages)) {
-          const lastUserMsg = [...messages]
-            .reverse()
-            .find((message) =>
-              message && typeof message === "object" && "role" in message && (message as { role?: unknown }).role === "user",
-            )
+    "experimental.chat.messages.transform": async (_input, output) => {
+      const { query, sessionID } = getLastUserQuery(output.messages)
 
-          if (lastUserMsg && typeof lastUserMsg === "object" && "content" in lastUserMsg) {
-            const content = (lastUserMsg as { content?: unknown }).content
-            query = typeof content === "string" ? content : JSON.stringify(content)
+      if (sessionID) {
+        const alreadySurfaced = new Set<string>()
+        for (const message of output.messages) {
+          const role = String(message.info.role)
+          if (role !== "system") continue
+          for (const part of message.parts) {
+            if (!part || typeof part !== "object") continue
+            const text = (part as { text?: string }).text
+            if (typeof text === "string") {
+              for (const key of extractSurfacedMemoryKeys(text)) {
+                alreadySurfaced.add(key)
+              }
+            }
           }
         }
+
+        const recentTools = extractRecentTools(
+          output.messages as Array<{ info?: { role?: unknown }; parts?: unknown[] }>,
+        )
+
+        turnContextBySession.set(sessionID, { query, alreadySurfaced, recentTools })
       }
 
-      const recalled = recallRelevantMemories(worktree, query)
+      if (shouldIgnoreMemoryContext(query)) {
+        output.messages = output.messages
+          .map((message) => {
+            const role = String(message.info.role)
+            if (role !== "system") return message
+
+            const parts = message.parts.filter((part) => !isAutoMemoryPart(part))
+            return { ...message, parts }
+          })
+          .filter((message) => message.parts.length > 0)
+      }
+    },
+
+    "experimental.chat.system.transform": async (_input, output) => {
+      let sessionID: string | undefined
+      if (_input && typeof _input === "object") {
+        sessionID = (typeof (_input as { sessionID?: unknown }).sessionID === "string"
+          ? (_input as { sessionID?: string }).sessionID
+          : undefined)
+      }
+
+      const ctx = sessionID ? turnContextBySession.get(sessionID) : undefined
+      const query = ctx?.query
+      const alreadySurfaced = ctx?.alreadySurfaced ?? new Set<string>()
+      const recentTools = ctx?.recentTools ?? []
+
+      const ignoreMemoryContext = process.env.OPENCODE_MEMORY_IGNORE === "1" || shouldIgnoreMemoryContext(query)
+      const recalled = ignoreMemoryContext ? [] : recallRelevantMemories(worktree, query, alreadySurfaced, recentTools)
+
       const recalledSection = formatRecalledMemories(recalled)
-      const memoryPrompt = buildMemorySystemPrompt(worktree, recalledSection)
+      const memoryPrompt = buildMemorySystemPrompt(worktree, recalledSection, {
+        includeIndex: !ignoreMemoryContext,
+      })
       output.system.push(memoryPrompt)
     },
 

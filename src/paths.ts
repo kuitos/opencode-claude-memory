@@ -141,10 +141,13 @@ function getClaudeConfigHomeDir(): string {
   return (process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")).normalize("NFC")
 }
 
-export function getMemoryDir(worktree: string): string {
+export function getProjectDir(worktree: string): string {
   const canonicalRoot = findCanonicalGitRoot(worktree) ?? worktree
-  const projectsDir = join(getClaudeConfigHomeDir(), "projects")
-  const memoryDir = join(projectsDir, sanitizePath(canonicalRoot), "memory")
+  return join(getClaudeConfigHomeDir(), "projects", sanitizePath(canonicalRoot))
+}
+
+export function getMemoryDir(worktree: string): string {
+  const memoryDir = join(getProjectDir(worktree), "memory")
   ensureDir(memoryDir)
   return memoryDir
 }

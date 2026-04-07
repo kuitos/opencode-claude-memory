@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, readdirSync, unlinkSync, existsSync } from "fs"
+import { readFileSync, writeFileSync, readdirSync, unlinkSync } from "fs"
 import { join, basename } from "path"
 import {
   getMemoryDir,
@@ -7,6 +7,8 @@ import {
   validateMemoryFileName,
   MAX_MEMORY_FILES,
   MAX_MEMORY_FILE_BYTES,
+  MAX_ENTRYPOINT_LINES,
+  MAX_ENTRYPOINT_BYTES,
   FRONTMATTER_MAX_LINES,
 } from "./paths.js"
 
@@ -75,7 +77,7 @@ export function listMemories(worktree: string): MemoryEntry[] {
 
   let files: string[]
   try {
-    files = readdirSync(memDir)
+    files = readdirSync(memDir, { encoding: "utf-8" })
       .filter((f) => f.endsWith(".md") && f !== ENTRYPOINT_NAME)
       .sort()
       .slice(0, MAX_MEMORY_FILES)
@@ -214,30 +216,57 @@ function removeFromIndex(worktree: string, fileName: string): void {
   writeFileSync(entrypoint, lines.length > 0 ? lines.join("\n") + "\n" : "", "utf-8")
 }
 
-export function truncateEntrypoint(raw: string): { content: string; wasTruncated: boolean } {
-  const trimmed = raw.trim()
-  if (!trimmed) return { content: "", wasTruncated: false }
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`
+  return `${(bytes / 1024).toFixed(1)}KB`
+}
 
-  const lines = trimmed.split("\n")
-  const lineCount = lines.length
+export type EntrypointTruncation = {
+  content: string
+  lineCount: number
+  byteCount: number
+  wasLineTruncated: boolean
+  wasByteTruncated: boolean
+}
+
+// Port of Claude Code's truncateEntrypointContent() from memdir.ts.
+// Uses .length (char count, same as Claude Code) for byte measurement.
+export function truncateEntrypoint(raw: string): EntrypointTruncation {
+  const trimmed = raw.trim()
+  if (!trimmed) return { content: "", lineCount: 0, byteCount: 0, wasLineTruncated: false, wasByteTruncated: false }
+
+  const contentLines = trimmed.split("\n")
+  const lineCount = contentLines.length
   const byteCount = trimmed.length
 
-  const wasLineTruncated = lineCount > 200
-  const wasByteTruncated = byteCount > 25_000
+  const wasLineTruncated = lineCount > MAX_ENTRYPOINT_LINES
+  const wasByteTruncated = byteCount > MAX_ENTRYPOINT_BYTES
 
   if (!wasLineTruncated && !wasByteTruncated) {
-    return { content: trimmed, wasTruncated: false }
+    return { content: trimmed, lineCount, byteCount, wasLineTruncated, wasByteTruncated }
   }
 
-  let truncated = wasLineTruncated ? lines.slice(0, 200).join("\n") : trimmed
+  let truncated = wasLineTruncated
+    ? contentLines.slice(0, MAX_ENTRYPOINT_LINES).join("\n")
+    : trimmed
 
-  if (truncated.length > 25_000) {
-    const cutAt = truncated.lastIndexOf("\n", 25_000)
-    truncated = truncated.slice(0, cutAt > 0 ? cutAt : 25_000)
+  if (truncated.length > MAX_ENTRYPOINT_BYTES) {
+    const cutAt = truncated.lastIndexOf("\n", MAX_ENTRYPOINT_BYTES)
+    truncated = truncated.slice(0, cutAt > 0 ? cutAt : MAX_ENTRYPOINT_BYTES)
   }
+
+  const reason =
+    wasByteTruncated && !wasLineTruncated
+      ? `${formatFileSize(byteCount)} (limit: ${formatFileSize(MAX_ENTRYPOINT_BYTES)}) — index entries are too long`
+      : wasLineTruncated && !wasByteTruncated
+        ? `${lineCount} lines (limit: ${MAX_ENTRYPOINT_LINES})`
+        : `${lineCount} lines and ${formatFileSize(byteCount)}`
 
   return {
-    content: truncated + "\n\n> WARNING: MEMORY.md was truncated. Keep index entries concise.",
-    wasTruncated: true,
+    content: truncated + `\n\n> WARNING: ${ENTRYPOINT_NAME} is ${reason}. Only part of it was loaded. Keep index entries to one line under ~200 chars; move detail into topic files.`,
+    lineCount,
+    byteCount,
+    wasLineTruncated,
+    wasByteTruncated,
   }
 }

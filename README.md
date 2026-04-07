@@ -122,6 +122,15 @@ The shell hook defines an `opencode()` function that delegates to `opencode-memo
 
 The implementation ports core logic from Claude Code for path hashing, git-root/worktree handling, memory format, and memory prompting behavior, so both tools can operate on the same files safely.
 
+Key modules ported from Claude Code's `src/memdir/`:
+
+| Module | Source | Purpose |
+|---|---|---|
+| `memoryScan.ts` | `memoryScan.ts` | Recursive directory scan + frontmatter header parsing |
+| `recall.ts` | `findRelevantMemories.ts` | Memory recall via keyword scoring (heuristic, no LLM side-query) |
+| `prompt.ts` | `memoryTypes.ts` + `memdir.ts` | System prompt sections, type taxonomy, truncation |
+| `memory.ts` | `memdir.ts` | `truncateEntrypoint()` aligned with `truncateEntrypointContent()` |
+
 ## 👥 Who this is for
 
 - You use **both Claude Code and OpenCode**.
@@ -214,6 +223,16 @@ Supported memory types:
 - `memory_list`: list memory metadata
 - `memory_search`: search by keyword
 - `memory_read`: read full memory content
+
+## 🧪 Development
+
+```bash
+# Run tests
+bun test
+
+# No build needed — raw TS consumed by OpenCode
+# Release: push to main triggers semantic-release → npm publish
+```
 
 ## 📄 License
 

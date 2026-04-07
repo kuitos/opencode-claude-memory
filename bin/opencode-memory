@@ -40,16 +40,52 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+resolve_script_path() {
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "${BASH_SOURCE[0]}" <<'PY'
+import os
+import sys
+
+print(os.path.realpath(sys.argv[1]))
+PY
+    return 0
+  fi
+
+  printf '%s\n' "${BASH_SOURCE[0]}"
+}
+
+SCRIPT_PATH="$(resolve_script_path)"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 PACKAGE_JSON="$SCRIPT_DIR/../package.json"
+
+resolve_package_json() {
+  if [ -f "$PACKAGE_JSON" ]; then
+    printf '%s\n' "$PACKAGE_JSON"
+    return 0
+  fi
+
+  if command -v npm >/dev/null 2>&1; then
+    local npm_root
+    npm_root=$(npm root -g 2>/dev/null || true)
+    if [ -n "$npm_root" ] && [ -f "$npm_root/opencode-claude-memory/package.json" ]; then
+      printf '%s\n' "$npm_root/opencode-claude-memory/package.json"
+      return 0
+    fi
+  fi
+
+  printf '%s\n' "$PACKAGE_JSON"
+}
 
 print_wrapper_version() {
   local version
+  local package_json
 
-  version=$(awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }' "$PACKAGE_JSON")
+  package_json="$(resolve_package_json)"
+
+  version=$(awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }' "$package_json")
 
   if [ -z "$version" ]; then
-    echo "[opencode-memory] ERROR: Cannot read package version from $PACKAGE_JSON" >&2
+    echo "[opencode-memory] ERROR: Cannot read package version from $package_json" >&2
     exit 1
   fi
 
@@ -184,6 +220,35 @@ find_real_opencode() {
 
 REAL_OPENCODE="$(find_real_opencode)"
 
+is_opencode_subcommand() {
+  case "$1" in
+    completion|acp|mcp|attach|run|debug|providers|auth|agent|upgrade|uninstall|serve|web|models|stats|export|import|github|pr|session|plugin|plug|db)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+extract_working_dir_from_args() {
+  local previous=""
+  for arg in "$@"; do
+    if [ "$previous" = "--dir" ]; then
+      printf '%s\n' "$arg"
+      return 0
+    fi
+    previous="$arg"
+  done
+
+  if [ "$#" -gt 0 ] && [ -n "${1:-}" ] && [[ "${1:-}" != -* ]] && ! is_opencode_subcommand "$1" && [ -d "$1" ]; then
+    printf '%s\n' "$1"
+    return 0
+  fi
+
+  return 1
+}
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -201,8 +266,9 @@ AUTODREAM_SCAN_LIMIT="${OPENCODE_MEMORY_AUTODREAM_SCAN_LIMIT:-200}"
 AUTODREAM_MODEL="${OPENCODE_MEMORY_AUTODREAM_MODEL:-$EXTRACT_MODEL}"
 AUTODREAM_AGENT="${OPENCODE_MEMORY_AUTODREAM_AGENT:-$EXTRACT_AGENT}"
 AUTODREAM_STALE_LOCK_SECS=$((60 * 60))
+SESSION_WAIT_SECONDS="${OPENCODE_MEMORY_SESSION_WAIT_SECONDS:-5}"
 
-WORKING_DIR="${OPENCODE_MEMORY_DIR:-$(pwd)}"
+WORKING_DIR="${OPENCODE_MEMORY_DIR:-$(extract_working_dir_from_args "$@" || pwd)}"
 
 TMP_BASE_DIR="${TMPDIR:-/tmp}"
 while [ "$TMP_BASE_DIR" != "/" ] && [ "${TMP_BASE_DIR%/}" != "$TMP_BASE_DIR" ]; do
@@ -407,6 +473,351 @@ get_latest_session_id() {
   fi
 }
 
+get_session_target_id() {
+  local before_json="$1"
+  local started_at_ms="$2"
+  local workdir="$3"
+  local project_dir="$4"
+  local after_json
+
+  after_json=$(get_session_list_json "$AUTODREAM_SCAN_LIMIT") || return 1
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$before_json" "$after_json" "$started_at_ms" "$workdir" "$project_dir" <<'PY'
+import json
+import os
+import sys
+
+before_raw, after_raw, started_at_ms_raw, workdir, project_dir = sys.argv[1:6]
+
+def parse(raw):
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def timestamp(item):
+    time_obj = item.get("time") if isinstance(item.get("time"), dict) else {}
+    for key in ("updated", "created"):
+        value = item.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except Exception:
+                pass
+        value = time_obj.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except Exception:
+                pass
+    return 0
+
+def normalize(path):
+    if not path:
+        return ""
+    return os.path.realpath(path)
+
+before = parse(before_raw)
+after = parse(after_raw)
+started_at_ms = int(started_at_ms_raw or "0")
+before_ids = {item.get("id") for item in before if item.get("id")}
+workdir = normalize(workdir)
+project_dir = normalize(project_dir)
+
+def in_scope(item):
+    directory = normalize(item.get("directory", ""))
+    return directory != "" and directory in {workdir, project_dir}
+
+def choose(candidates):
+    ranked = sorted(
+        [item for item in candidates if item.get("id")],
+        key=lambda item: timestamp(item),
+        reverse=True,
+    )
+    if ranked:
+        print(ranked[0]["id"])
+        return True
+    return False
+
+new_sessions = [item for item in after if item.get("id") not in before_ids]
+updated_sessions = [item for item in after if timestamp(item) > started_at_ms]
+
+for pool in (
+    [item for item in new_sessions if in_scope(item)],
+    [item for item in updated_sessions if in_scope(item)],
+    [item for item in after if in_scope(item)],
+):
+    if choose(pool):
+        break
+PY
+    return 0
+  fi
+
+  get_latest_session_id
+}
+
+get_transcripts_dir() {
+  printf '%s\n' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/transcripts"
+}
+
+get_storage_session_diff_dir() {
+  printf '%s\n' "$HOME/.local/share/opencode/storage/session_diff"
+}
+
+resolve_session_directory() {
+  local session_id="$1"
+  local output_file
+
+  output_file=$(mktemp)
+  if ! "$REAL_OPENCODE" export "$session_id" >"$output_file" 2>/dev/null; then
+    rm -f "$output_file"
+    return 1
+  fi
+
+  if [ ! -s "$output_file" ]; then
+    rm -f "$output_file"
+    return 1
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$output_file" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+raw = Path(sys.argv[1]).read_text()
+start = raw.find('{')
+if start == -1:
+    raise SystemExit(1)
+
+try:
+    data = json.loads(raw[start:])
+except Exception:
+    raise SystemExit(1)
+
+directory = ((data.get("info") or {}).get("directory") or "")
+if directory:
+    print(directory)
+PY
+    local status=$?
+    rm -f "$output_file"
+    return $status
+  fi
+
+  rm -f "$output_file"
+  return 1
+}
+
+get_scoped_artifact_session_id_since() {
+  local timestamp_file="$1"
+  local workdir="$2"
+  local project_dir="$3"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local candidates
+  candidates=$(python3 - "$timestamp_file" "$HOME" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" <<'PY'
+import os
+import sys
+
+timestamp_file, home_dir, claude_dir = sys.argv[1:4]
+
+try:
+    threshold = os.path.getmtime(timestamp_file)
+except OSError:
+    raise SystemExit(1)
+
+sources = [
+    (os.path.join(home_dir, '.local', 'share', 'opencode', 'storage', 'session_diff'), '.json'),
+    (os.path.join(claude_dir, 'transcripts'), '.jsonl'),
+]
+
+latest = {}
+for directory, suffix in sources:
+    if not os.path.isdir(directory):
+        continue
+    for entry in os.scandir(directory):
+        if not entry.is_file() or not entry.name.endswith(suffix):
+            continue
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            continue
+        if mtime <= threshold:
+            continue
+        session_id = entry.name[:-len(suffix)]
+        latest[session_id] = max(latest.get(session_id, -1), mtime)
+
+for session_id, mtime in sorted(latest.items(), key=lambda item: item[1], reverse=True):
+    print(session_id)
+PY
+  ) || return 1
+
+  local session_id=""
+  local session_dir=""
+  local normalized_session_dir=""
+  local normalized_workdir=""
+  local normalized_project_dir=""
+  normalized_workdir=$(python3 - "$workdir" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+)
+  normalized_project_dir=$(python3 - "$project_dir" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+)
+
+  while IFS= read -r session_id; do
+    [ -n "$session_id" ] || continue
+    session_dir=$(resolve_session_directory "$session_id" || true)
+    [ -n "$session_dir" ] || continue
+    normalized_session_dir=$(python3 - "$session_dir" <<'PY'
+import os, sys
+print(os.path.realpath(sys.argv[1]))
+PY
+)
+    if [ "$normalized_session_dir" = "$normalized_workdir" ] || [ "$normalized_session_dir" = "$normalized_project_dir" ]; then
+      printf '%s\n' "$session_id"
+      return 0
+    fi
+  done <<EOF
+$candidates
+EOF
+
+  return 1
+}
+
+get_latest_storage_session_id_since() {
+  local timestamp_file="$1"
+  local storage_dir
+  storage_dir=$(get_storage_session_diff_dir)
+
+  if [ ! -d "$storage_dir" ]; then
+    return 1
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$storage_dir" "$timestamp_file" <<'PY'
+import os
+import sys
+
+storage_dir, timestamp_file = sys.argv[1:3]
+
+try:
+    threshold = os.path.getmtime(timestamp_file)
+except OSError:
+    raise SystemExit(1)
+
+latest = None
+latest_mtime = -1.0
+
+for entry in os.scandir(storage_dir):
+    if not entry.is_file() or not entry.name.endswith('.json'):
+        continue
+    try:
+        mtime = entry.stat().st_mtime
+    except OSError:
+        continue
+    if mtime <= threshold:
+        continue
+    if mtime > latest_mtime:
+        latest_mtime = mtime
+        latest = entry.name[:-5]
+
+if latest:
+    print(latest)
+PY
+    return 0
+  fi
+
+  return 1
+}
+
+get_latest_transcript_session_id_since() {
+  local timestamp_file="$1"
+  local transcripts_dir
+  transcripts_dir=$(get_transcripts_dir)
+
+  if [ ! -d "$transcripts_dir" ]; then
+    return 1
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$transcripts_dir" "$timestamp_file" <<'PY'
+import os
+import sys
+
+transcripts_dir, timestamp_file = sys.argv[1:3]
+
+try:
+    threshold = os.path.getmtime(timestamp_file)
+except OSError:
+    raise SystemExit(1)
+
+latest = None
+latest_mtime = -1.0
+
+for entry in os.scandir(transcripts_dir):
+    if not entry.is_file() or not entry.name.endswith('.jsonl'):
+        continue
+    try:
+        mtime = entry.stat().st_mtime
+    except OSError:
+        continue
+    if mtime <= threshold:
+        continue
+    if mtime > latest_mtime:
+        latest_mtime = mtime
+        latest = entry.name[:-6]
+
+if latest:
+    print(latest)
+PY
+    return 0
+  fi
+
+  return 1
+}
+
+main_prompt_requests_ignore_memory() {
+  if [ "${1:-}" != "run" ]; then
+    return 1
+  fi
+
+  local joined
+  joined=$(printf '%s\n' "$*" | tr '[:upper:]' '[:lower:]')
+  printf '%s\n' "$joined" | grep -Eq "(ignore|don't use|do not use|without|skip)[[:space:]]+(the[[:space:]]+)?memory|memory[[:space:]]+((should|must)[[:space:]]+be[[:space:]]+)?ignored"
+}
+
+wait_for_session_target_id() {
+  local before_json="$1"
+  local started_at_ms="$2"
+  local wait_seconds="${3:-5}"
+  local attempt=0
+  local session_id=""
+
+  while [ "$attempt" -lt "$wait_seconds" ]; do
+    session_id=$(get_session_target_id "$before_json" "$started_at_ms" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
+    if [ -z "$session_id" ]; then
+      session_id=$(get_scoped_artifact_session_id_since "$TIMESTAMP_FILE" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
+    fi
+    if [ -n "$session_id" ]; then
+      printf '%s\n' "$session_id"
+      return 0
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
 file_mtime_secs() {
   local file="$1"
   if [ ! -f "$file" ]; then
@@ -565,7 +976,7 @@ run_extraction_if_needed() {
   log "Extracting memories from session $session_id..."
   log "Extraction log: $EXTRACT_LOG_FILE"
 
-  local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork)
+  local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork --dir "$WORKING_DIR")
   if [ -n "$EXTRACT_MODEL" ]; then
     cmd+=(-m "$EXTRACT_MODEL")
   fi
@@ -623,7 +1034,7 @@ run_autodream_if_needed() {
   log "Auto-dream firing (${hours_since}h since last consolidation, ${touched_count} sessions touched)"
   log "Auto-dream log: $AUTODREAM_LOG_FILE"
 
-  local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork)
+  local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork --dir "$WORKING_DIR")
   if [ -n "$AUTODREAM_MODEL" ]; then
     cmd+=(-m "$AUTODREAM_MODEL")
   fi
@@ -657,10 +1068,16 @@ run_post_session_tasks() {
 
 # Step 0: Create timestamp marker before running opencode
 TIMESTAMP_FILE=$(mktemp)
+SESSION_CAPTURE_STARTED_AT_MS=$(( $(date +%s) * 1000 ))
+PRE_SESSION_JSON=$(get_session_list_json "$AUTODREAM_SCAN_LIMIT" 2>/dev/null || true)
 
 # Step 1: Run the real opencode with all original arguments, capture exit code
 opencode_exit=0
-"$REAL_OPENCODE" "$@" || opencode_exit=$?
+if main_prompt_requests_ignore_memory "$@"; then
+  OPENCODE_MEMORY_IGNORE=1 "$REAL_OPENCODE" "$@" || opencode_exit=$?
+else
+  "$REAL_OPENCODE" "$@" || opencode_exit=$?
+fi
 
 # Step 2: If no maintenance task is enabled, exit early
 if [ "$EXTRACT_ENABLED" = "0" ] && [ "$AUTODREAM_ENABLED" = "0" ]; then
@@ -668,8 +1085,8 @@ if [ "$EXTRACT_ENABLED" = "0" ] && [ "$AUTODREAM_ENABLED" = "0" ]; then
   exit $opencode_exit
 fi
 
-# Step 3: Get the most recent session ID
-session_id=$(get_latest_session_id || true)
+# Step 3: Capture the session ID for this invocation
+session_id=$(wait_for_session_target_id "$PRE_SESSION_JSON" "$SESSION_CAPTURE_STARTED_AT_MS" "$SESSION_WAIT_SECONDS" || true)
 if [ -z "$session_id" ]; then
   log "No session found, skipping post-session memory maintenance"
   cleanup_timestamp
