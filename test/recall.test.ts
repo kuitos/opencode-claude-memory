@@ -135,8 +135,7 @@ describe("recallRelevantMemories", () => {
       "Fresh content",
     )
 
-    const surfacedPath = join(memDir, "surfaced.md")
-    const result = recallRelevantMemories(repo, undefined, new Set([surfacedPath]))
+    const result = recallRelevantMemories(repo, undefined, new Set(["Already Shown|user"]))
 
     expect(result).toHaveLength(1)
     expect(result[0]!.fileName).toBe("fresh.md")

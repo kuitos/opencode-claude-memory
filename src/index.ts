@@ -12,11 +12,17 @@ import {
 } from "./memory.js"
 import { getMemoryDir } from "./paths.js"
 
-const latestUserQueryBySession = new Map<string, string>()
-const surfacedMemoriesBySession = new Map<string, Set<string>>()
-const recentToolsBySession = new Map<string, string[]>()
+// Per-turn derived state — overwritten each time messages.transform fires.
+// This replaces the old process-global session Maps so that compact naturally
+// resets both alreadySurfaced and recentTools (the messages shrink after compact,
+// so the derived state shrinks with them).
+type TurnContext = {
+  query?: string
+  alreadySurfaced: Set<string>
+  recentTools: string[]
+}
 
-const MAX_RECENT_TOOLS = 20
+const turnContextBySession = new Map<string, TurnContext>()
 
 function shouldIgnoreMemoryContext(query: string | undefined): boolean {
   if (process.env.OPENCODE_MEMORY_IGNORE === "1") return true
@@ -74,46 +80,78 @@ function getLastUserQuery(messages: Array<{ info?: { role?: unknown; sessionID?:
   return {}
 }
 
-function cacheLatestUserQuery(sessionID: string | undefined, message: unknown): void {
-  if (!sessionID) return
-  const query = extractUserQuery(message)
-  if (query) {
-    latestUserQueryBySession.set(sessionID, query)
-  }
-}
-
 function isAutoMemoryPart(part: unknown): boolean {
   if (!part || typeof part !== "object") return false
   return typeof (part as { text?: unknown }).text === "string" &&
     (part as { text: string }).text.includes("# Auto Memory")
 }
 
+// Parses "### <name> (<type>)" headers from the ## Recalled Memories section
+// of system prompts. After compaction old system messages disappear, so
+// the returned set naturally shrinks — no manual reset needed.
+function extractSurfacedMemoryKeys(systemText: string): Set<string> {
+  const keys = new Set<string>()
+  const recalledSection = systemText.indexOf("## Recalled Memories")
+  if (recalledSection === -1) return keys
+
+  const headerPattern = /^### (.+?) \((\w+)\)/gm
+  const section = systemText.slice(recalledSection)
+  for (let match = headerPattern.exec(section); match !== null; match = headerPattern.exec(section)) {
+    keys.add(`${match[1]}|${match[2]}`)
+  }
+  return keys
+}
+
+// Only completed tools — matches Claude Code's collectRecentSuccessfulTools().
+function extractRecentTools(
+  messages: Array<{ info?: { role?: unknown }; parts?: unknown[] }>,
+): string[] {
+  const tools: string[] = []
+  const seen = new Set<string>()
+  for (const message of messages) {
+    if (!message.parts || !Array.isArray(message.parts)) continue
+    for (const part of message.parts) {
+      if (!part || typeof part !== "object") continue
+      const p = part as { type?: string; tool?: string; state?: { status?: string } }
+      if (p.type !== "tool" || !p.tool) continue
+      if (p.state?.status !== "completed") continue
+      if (seen.has(p.tool)) continue
+      seen.add(p.tool)
+      tools.push(p.tool)
+    }
+  }
+  return tools
+}
+
 export const MemoryPlugin: Plugin = async ({ worktree }) => {
   getMemoryDir(worktree)
 
   return {
-    "chat.message": async (input, output) => {
-      cacheLatestUserQuery(input.sessionID, { parts: output.parts })
-    },
-
-    "tool.execute.after": async (input) => {
-      const { tool: toolName, sessionID } = input
-      if (!sessionID || !toolName) return
-      if (!recentToolsBySession.has(sessionID)) {
-        recentToolsBySession.set(sessionID, [])
-      }
-      const tools = recentToolsBySession.get(sessionID)!
-      if (!tools.includes(toolName)) {
-        tools.push(toolName)
-        if (tools.length > MAX_RECENT_TOOLS) {
-          tools.shift()
-        }
-      }
-    },
-
     "experimental.chat.messages.transform": async (_input, output) => {
       const { query, sessionID } = getLastUserQuery(output.messages)
-      if (query && sessionID) latestUserQueryBySession.set(sessionID, query)
+
+      if (sessionID) {
+        const alreadySurfaced = new Set<string>()
+        for (const message of output.messages) {
+          const role = String(message.info.role)
+          if (role !== "system") continue
+          for (const part of message.parts) {
+            if (!part || typeof part !== "object") continue
+            const text = (part as { text?: string }).text
+            if (typeof text === "string") {
+              for (const key of extractSurfacedMemoryKeys(text)) {
+                alreadySurfaced.add(key)
+              }
+            }
+          }
+        }
+
+        const recentTools = extractRecentTools(
+          output.messages as Array<{ info?: { role?: unknown }; parts?: unknown[] }>,
+        )
+
+        turnContextBySession.set(sessionID, { query, alreadySurfaced, recentTools })
+      }
 
       if (shouldIgnoreMemoryContext(query)) {
         output.messages = output.messages
@@ -129,42 +167,20 @@ export const MemoryPlugin: Plugin = async ({ worktree }) => {
     },
 
     "experimental.chat.system.transform": async (_input, output) => {
-      let query: string | undefined
       let sessionID: string | undefined
       if (_input && typeof _input === "object") {
         sessionID = (typeof (_input as { sessionID?: unknown }).sessionID === "string"
           ? (_input as { sessionID?: string }).sessionID
           : undefined)
-        if (sessionID) {
-          query = latestUserQueryBySession.get(sessionID)
-        }
-
-        const messages = (_input as { messages?: unknown }).messages
-        if (!query && Array.isArray(messages)) {
-          const lastUserMsg = [...messages]
-            .reverse()
-            .find((message) =>
-              message && typeof message === "object" && "role" in message && (message as { role?: unknown }).role === "user",
-            )
-
-          query = extractUserQuery(lastUserMsg)
-        }
       }
+
+      const ctx = sessionID ? turnContextBySession.get(sessionID) : undefined
+      const query = ctx?.query
+      const alreadySurfaced = ctx?.alreadySurfaced ?? new Set<string>()
+      const recentTools = ctx?.recentTools ?? []
 
       const ignoreMemoryContext = process.env.OPENCODE_MEMORY_IGNORE === "1" || shouldIgnoreMemoryContext(query)
-      const alreadySurfaced = sessionID ? (surfacedMemoriesBySession.get(sessionID) ?? new Set()) : new Set<string>()
-      const recentTools = sessionID ? (recentToolsBySession.get(sessionID) ?? []) : []
       const recalled = ignoreMemoryContext ? [] : recallRelevantMemories(worktree, query, alreadySurfaced, recentTools)
-
-      if (sessionID && recalled.length > 0) {
-        if (!surfacedMemoriesBySession.has(sessionID)) {
-          surfacedMemoriesBySession.set(sessionID, new Set())
-        }
-        const surfaced = surfacedMemoriesBySession.get(sessionID)!
-        for (const mem of recalled) {
-          surfaced.add(mem.filePath)
-        }
-      }
 
       const recalledSection = formatRecalledMemories(recalled)
       const memoryPrompt = buildMemorySystemPrompt(worktree, recalledSection, {

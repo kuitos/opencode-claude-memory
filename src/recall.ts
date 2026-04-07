@@ -105,7 +105,7 @@ export function recallRelevantMemories(
 ): RecalledMemory[] {
   const memoryDir = getMemoryDir(worktree)
   const headers = scanMemoryFiles(memoryDir).filter(
-    (h) => !alreadySurfaced.has(h.filePath),
+    (h) => !alreadySurfaced.has(`${h.name ?? h.filename.replace(/\.md$/, "").replace(/.*\//, "")}|${h.type ?? "user"}`),
   )
   if (headers.length === 0) return []
 

@@ -111,13 +111,11 @@ describe("end-to-end memory lifecycle", () => {
 
   test("alreadySurfaced prevents double-recall", () => {
     const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
 
     saveMemory(repo, "seen", "Already Seen", "Was shown before", "user", "Already surfaced content")
     saveMemory(repo, "unseen", "Not Seen", "Fresh content", "feedback", "New content")
 
-    const seenPath = join(memDir, "seen.md")
-    const result = recallRelevantMemories(repo, undefined, new Set([seenPath]))
+    const result = recallRelevantMemories(repo, undefined, new Set(["Already Seen|user"]))
 
     expect(result).toHaveLength(1)
     expect(result[0]!.name).toBe("Not Seen")
