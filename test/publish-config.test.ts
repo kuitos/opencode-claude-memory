@@ -38,6 +38,7 @@ describe("package publish config", () => {
 
     const workflow = readFileSync(releaseWorkflowPath, "utf-8")
 
+    expect(workflow).toContain("workflow_dispatch:")
     expect(workflow).toContain("oven-sh/setup-bun")
     expect(workflow).toContain("bun install")
     expect(workflow).toContain("npx semantic-release@25")
