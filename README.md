@@ -230,7 +230,9 @@ Supported memory types:
 # Run tests
 bun test
 
-# No build needed — raw TS consumed by OpenCode
+# Build published artifacts
+bun run build
+
 # Release: push to main triggers semantic-release → npm publish
 ```
 

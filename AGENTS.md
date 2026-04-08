@@ -56,7 +56,7 @@ If you rename or change exports in `paths.ts` or `memory.ts`, check all downstre
 
 - **ESM `.js` imports**: All TypeScript imports use `.js` extension (`import { foo } from "./bar.js"`)
 - **No linter/formatter**: No eslintrc, prettierrc — no enforced style
-- **No build**: `main` and `exports` in package.json point to `src/index.ts` directly
+- **Published package is built**: `tsc` emits `dist/`, and npm publishes the compiled output
 - **Tests via Bun**: `bun test` runs all `test/*.test.ts` files
 - **Silent catch blocks**: Intentional — file operations fail gracefully (file may not exist)
 - **`@opencode-ai/plugin`** is a peerDependency, `bun-types` provides Node globals
@@ -91,15 +91,16 @@ If you rename or change exports in `paths.ts` or `memory.ts`, check all downstre
 ## Commands
 
 ```bash
-# No build needed — raw TS consumed by OpenCode
-
 # Run tests
 bun test
+
+# Build published artifacts
+bun run build
 
 # Release: push to main triggers semantic-release → npm publish
 git push origin main
 
-# Local dev: just edit src/ and test with opencode directly
+# Local dev: edit src/, then run build if you need the packaged entrypoints
 ```
 
 ## Notes
