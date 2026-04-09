@@ -1054,12 +1054,73 @@ run_autodream_if_needed() {
   fi
 }
 
+cleanup_forked_sessions() {
+  local before_json="$1"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local after_json
+  after_json=$(get_session_list_json 10 2>/dev/null || true)
+
+  if [ -z "$before_json" ] || [ -z "$after_json" ]; then
+    return 0
+  fi
+
+  local fork_ids
+  fork_ids=$(python3 - "$before_json" "$after_json" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" <<'PY'
+import json
+import os
+import sys
+
+def parse(raw):
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+before_raw, after_raw, workdir, project_dir = sys.argv[1:5]
+before = parse(before_raw)
+after = parse(after_raw)
+
+before_ids = {item.get("id") for item in before if item.get("id")}
+workdir = os.path.realpath(workdir)
+project_dir = os.path.realpath(project_dir)
+
+for item in after:
+    sid = item.get("id", "")
+    if not sid or sid in before_ids:
+        continue
+    directory = item.get("directory", "")
+    if not directory:
+        continue
+    d = os.path.realpath(directory)
+    if d in (workdir, project_dir):
+        print(sid)
+PY
+  ) || return 0
+
+  while IFS= read -r fork_id; do
+    [ -n "$fork_id" ] || continue
+    if "$REAL_OPENCODE" session delete "$fork_id" >/dev/null 2>&1; then
+      log "Cleaned up forked session $fork_id"
+    fi
+  done <<< "$fork_ids"
+}
+
 run_post_session_tasks() {
   local session_id="$1"
   local memory_written_during_session="$2"
 
+  local pre_tasks_json
+  pre_tasks_json=$(get_session_list_json 10 2>/dev/null || true)
+
   run_extraction_if_needed "$session_id" "$memory_written_during_session"
   run_autodream_if_needed "$session_id"
+
+  cleanup_forked_sessions "$pre_tasks_json"
 }
 
 # ============================================================================
