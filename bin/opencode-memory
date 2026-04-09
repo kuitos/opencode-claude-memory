@@ -1012,6 +1012,24 @@ PY
   done <<< "$fork_ids"
 }
 
+session_has_conversation() {
+  local session_id="$1"
+  local transcript_file
+  transcript_file="$(get_transcripts_dir)/${session_id}.jsonl"
+
+  if [ -f "$transcript_file" ]; then
+    local line_count
+    line_count=$(wc -l < "$transcript_file")
+    # Empty sessions have at most 1 line (the initial user entry with no content).
+    # Real sessions have 3+ lines (user + tool_use + tool_result at minimum).
+    [ "$line_count" -gt 1 ]
+    return $?
+  fi
+
+  # Transcript not found — assume content exists to avoid skipping a valid session.
+  return 0
+}
+
 run_extraction_if_needed() {
   local session_id="$1"
   local memory_written_during_session="$2"
@@ -1153,6 +1171,13 @@ fi
 session_id=$(wait_for_session_target_id "$PRE_SESSION_JSON" "$SESSION_CAPTURE_STARTED_AT_MS" "$SESSION_WAIT_SECONDS" || true)
 if [ -z "$session_id" ]; then
   log "No session found, skipping post-session memory maintenance"
+  cleanup_timestamp
+  exit $opencode_exit
+fi
+
+# Step 3.5: Skip if session had no real conversation (e.g. user opened TUI and exited)
+if ! session_has_conversation "$session_id"; then
+  log "Session $session_id has no conversation, skipping post-session memory maintenance"
   cleanup_timestamp
   exit $opencode_exit
 fi

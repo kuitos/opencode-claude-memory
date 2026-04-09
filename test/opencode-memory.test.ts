@@ -270,7 +270,7 @@ JSON
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
-  printf '{"type":"user","content":"wrapped"}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
+  printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
   echo "main run ok"
   exit 0
 fi
@@ -337,7 +337,7 @@ JSON
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
-  (sleep 1; printf '{"type":"user","content":"wrapped"}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_delayed_target.jsonl") &
+  (sleep 1; printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_delayed_target.jsonl") &
   echo "main run ok"
   exit 0
 fi
@@ -542,9 +542,9 @@ JSON
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts" "$HOME/.local/share/opencode/storage/session_diff"
-  printf '{"type":"user","content":"wrapped"}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
+  printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
   sleep 1
-  printf '{"type":"user","content":"other"}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_other_repo.jsonl"
+  printf '{"type":"user","content":"other"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_other_repo.jsonl"
   echo "main run ok"
   exit 0
 fi
@@ -658,7 +658,7 @@ if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
-  printf '{"type":"user","content":"wrapped"}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
+  printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
   echo "main run ok"
   exit 0
 fi
@@ -720,7 +720,7 @@ if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
-  printf '{"type":"user","content":"wrapped"}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
+  printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
   echo "main run ok"
   exit 0
 fi
