@@ -478,17 +478,18 @@ get_session_target_id() {
   local started_at_ms="$2"
   local workdir="$3"
   local project_dir="$4"
+  local allow_existing_fallback="${5:-1}"
   local after_json
 
   after_json=$(get_session_list_json "$AUTODREAM_SCAN_LIMIT") || return 1
 
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$before_json" "$after_json" "$started_at_ms" "$workdir" "$project_dir" <<'PY'
+    python3 - "$before_json" "$after_json" "$started_at_ms" "$workdir" "$project_dir" "$allow_existing_fallback" <<'PY'
 import json
 import os
 import sys
 
-before_raw, after_raw, started_at_ms_raw, workdir, project_dir = sys.argv[1:6]
+before_raw, after_raw, started_at_ms_raw, workdir, project_dir, allow_existing_fallback_raw = sys.argv[1:7]
 
 def parse(raw):
     try:
@@ -522,6 +523,7 @@ def normalize(path):
 before = parse(before_raw)
 after = parse(after_raw)
 started_at_ms = int(started_at_ms_raw or "0")
+allow_existing_fallback = allow_existing_fallback_raw == "1"
 before_ids = {item.get("id") for item in before if item.get("id")}
 workdir = normalize(workdir)
 project_dir = normalize(project_dir)
@@ -544,11 +546,15 @@ def choose(candidates):
 new_sessions = [item for item in after if item.get("id") not in before_ids]
 updated_sessions = [item for item in after if timestamp(item) > started_at_ms]
 
-for pool in (
+candidate_pools = [
     [item for item in new_sessions if in_scope(item)],
     [item for item in updated_sessions if in_scope(item)],
-    [item for item in after if in_scope(item)],
-):
+]
+
+if allow_existing_fallback:
+    candidate_pools.append([item for item in after if in_scope(item)])
+
+for pool in candidate_pools:
     if choose(pool):
         break
 PY
@@ -795,17 +801,19 @@ main_prompt_requests_ignore_memory() {
   printf '%s\n' "$joined" | grep -Eq "(ignore|don't use|do not use|without|skip)[[:space:]]+(the[[:space:]]+)?memory|memory[[:space:]]+((should|must)[[:space:]]+be[[:space:]]+)?ignored"
 }
 
-wait_for_session_target_id() {
+wait_for_scoped_session_id_since() {
   local before_json="$1"
   local started_at_ms="$2"
-  local wait_seconds="${3:-5}"
+  local timestamp_file="$3"
+  local wait_seconds="${4:-5}"
+  local allow_existing_fallback="${5:-1}"
   local attempt=0
   local session_id=""
 
   while [ "$attempt" -lt "$wait_seconds" ]; do
-    session_id=$(get_session_target_id "$before_json" "$started_at_ms" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
+    session_id=$(get_session_target_id "$before_json" "$started_at_ms" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" "$allow_existing_fallback" || true)
     if [ -z "$session_id" ]; then
-      session_id=$(get_scoped_artifact_session_id_since "$TIMESTAMP_FILE" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
+      session_id=$(get_scoped_artifact_session_id_since "$timestamp_file" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
     fi
     if [ -n "$session_id" ]; then
       printf '%s\n' "$session_id"
@@ -816,6 +824,14 @@ wait_for_session_target_id() {
   done
 
   return 1
+}
+
+wait_for_session_target_id() {
+  local before_json="$1"
+  local started_at_ms="$2"
+  local wait_seconds="${3:-5}"
+
+  wait_for_scoped_session_id_since "$before_json" "$started_at_ms" "$TIMESTAMP_FILE" "$wait_seconds"
 }
 
 file_mtime_secs() {
@@ -958,58 +974,32 @@ rollback_consolidation_lock() {
 
 cleanup_forked_sessions() {
   local before_json="$1"
+  local started_at_ms="$2"
+  local timestamp_file="$3"
+
+  if [ -z "$before_json" ] || [ -z "$started_at_ms" ] || [ -z "$timestamp_file" ]; then
+    return 0
+  fi
 
   if ! command -v python3 >/dev/null 2>&1; then
     return 0
   fi
 
-  local after_json
-  after_json=$(get_session_list_json 10 2>/dev/null || true)
-
-  if [ -z "$before_json" ] || [ -z "$after_json" ]; then
+  if ! python3 - <<'PY' >/dev/null 2>&1
+pass
+PY
+  then
     return 0
   fi
 
-  local fork_ids
-  fork_ids=$(python3 - "$before_json" "$after_json" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" <<'PY'
-import json
-import os
-import sys
+  local fork_id
+  fork_id=$(wait_for_scoped_session_id_since "$before_json" "$started_at_ms" "$timestamp_file" "$SESSION_WAIT_SECONDS" 0 || true)
 
-def parse(raw):
-    try:
-        data = json.loads(raw)
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
+  [ -n "$fork_id" ] || return 0
 
-before_raw, after_raw, workdir, project_dir = sys.argv[1:5]
-before = parse(before_raw)
-after = parse(after_raw)
-
-before_ids = {item.get("id") for item in before if item.get("id")}
-workdir = os.path.realpath(workdir)
-project_dir = os.path.realpath(project_dir)
-
-for item in after:
-    sid = item.get("id", "")
-    if not sid or sid in before_ids:
-        continue
-    directory = item.get("directory", "")
-    if not directory:
-        continue
-    d = os.path.realpath(directory)
-    if d in (workdir, project_dir):
-        print(sid)
-PY
-  ) || return 0
-
-  while IFS= read -r fork_id; do
-    [ -n "$fork_id" ] || continue
-    if "$REAL_OPENCODE" session delete "$fork_id" >/dev/null 2>&1; then
-      log "Cleaned up forked session $fork_id"
-    fi
-  done <<< "$fork_ids"
+  if "$REAL_OPENCODE" session delete "$fork_id" >/dev/null 2>&1; then
+    log "Cleaned up forked session $fork_id"
+  fi
 }
 
 session_has_conversation() {
@@ -1060,7 +1050,11 @@ run_extraction_if_needed() {
   cmd+=("$EXTRACT_PROMPT")
 
   local pre_fork_json
-  pre_fork_json=$(get_session_list_json 5 2>/dev/null || true)
+  pre_fork_json=$(get_session_list_json "$AUTODREAM_SCAN_LIMIT" 2>/dev/null || true)
+  local fork_timestamp_file
+  fork_timestamp_file=$(mktemp)
+  local fork_started_at_ms
+  fork_started_at_ms=$(( $(date +%s) * 1000 ))
 
   if "${cmd[@]}" >> "$EXTRACT_LOG_FILE" 2>&1; then
     log "Memory extraction completed successfully"
@@ -1069,7 +1063,8 @@ run_extraction_if_needed() {
     log "Memory extraction failed (exit code $code). Check $EXTRACT_LOG_FILE for details"
   fi
 
-  cleanup_forked_sessions "$pre_fork_json"
+  cleanup_forked_sessions "$pre_fork_json" "$fork_started_at_ms" "$fork_timestamp_file"
+  rm -f "$fork_timestamp_file"
   release_simple_lock "$EXTRACT_LOCK_FILE"
 }
 
@@ -1122,7 +1117,11 @@ run_autodream_if_needed() {
   cmd+=("$AUTODREAM_PROMPT")
 
   local pre_fork_json
-  pre_fork_json=$(get_session_list_json 5 2>/dev/null || true)
+  pre_fork_json=$(get_session_list_json "$AUTODREAM_SCAN_LIMIT" 2>/dev/null || true)
+  local fork_timestamp_file
+  fork_timestamp_file=$(mktemp)
+  local fork_started_at_ms
+  fork_started_at_ms=$(( $(date +%s) * 1000 ))
 
   if "${cmd[@]}" >> "$AUTODREAM_LOG_FILE" 2>&1; then
     log "Auto-dream consolidation completed successfully"
@@ -1133,7 +1132,8 @@ run_autodream_if_needed() {
     rollback_consolidation_lock "$CONSOLIDATION_PRIOR_MTIME"
   fi
 
-  cleanup_forked_sessions "$pre_fork_json"
+  cleanup_forked_sessions "$pre_fork_json" "$fork_started_at_ms" "$fork_timestamp_file"
+  rm -f "$fork_timestamp_file"
 }
 
 run_post_session_tasks() {
