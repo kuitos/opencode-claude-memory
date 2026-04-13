@@ -129,6 +129,7 @@ exit 0
         HOME: homeDir,
         TMPDIR: tmpDir,
         CLAUDE_CONFIG_DIR: claudeDir,
+        OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
         OPENCODE_MEMORY_FOREGROUND: "1",
         OPENCODE_MEMORY_TERMINAL_LOG: "0",
         OPENCODE_MEMORY_AUTODREAM: "0",
@@ -756,5 +757,147 @@ exit 0
     const logPath = join(logDir, logFiles[0] ?? "")
     const logContent = readFileSync(logPath, "utf-8")
     expect(logContent).toContain(`fork args:run -s ses_wrapped_target --fork --dir ${projectDir}`)
+  })
+
+  test("cleans up fork sessions discovered from artifacts when session list omits them", () => {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const stateFile = join(root, "delete-log")
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+DELETE_LOG="${stateFile}"
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}"}]'
+  exit 0
+fi
+if [ "\${1:-}" = "export" ]; then
+  if [ "\${2:-}" = "ses_fork_cleanup_target" ]; then
+    cat <<'JSON'
+{"info":{"directory":"${root}"}}
+JSON
+  else
+    cat <<'JSON'
+{"info":{"directory":"${root}"}}
+JSON
+  fi
+  exit 0
+fi
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "delete" ]; then
+  printf '%s\n' "\${3:-}" >> "$DELETE_LOG"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
+  echo "main run ok"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"fork"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_target.jsonl"
+  echo "forked cleanup run"
+  exit 0
+fi
+exit 0
+`,
+    )
+
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
+      cwd: root,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        HOME: homeDir,
+        TMPDIR: tmpDir,
+        CLAUDE_CONFIG_DIR: claudeDir,
+        OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+        OPENCODE_MEMORY_FOREGROUND: "1",
+        OPENCODE_MEMORY_AUTODREAM: "0",
+      },
+    })
+
+    expect(result.status).toBe(0)
+    expect(existsSync(stateFile)).toBe(true)
+    expect(readFileSync(stateFile, "utf-8")).toContain("ses_fork_cleanup_target")
+  })
+
+  test("skips fork cleanup safely when python3 is unavailable", () => {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const deleteLog = join(root, "delete-log")
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+DELETE_LOG="${deleteLog}"
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}"}]'
+  exit 0
+fi
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "delete" ]; then
+  printf '%s\n' "\${3:-}" >> "$DELETE_LOG"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
+  echo "main run ok"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"fork"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_target.jsonl"
+  echo "forked cleanup run"
+  exit 0
+fi
+exit 0
+`,
+    )
+
+    writeExecutable(
+      join(fakeBin, "python3"),
+      `#!/usr/bin/env bash
+exit 127
+`,
+    )
+
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
+      cwd: root,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        HOME: homeDir,
+        TMPDIR: tmpDir,
+        CLAUDE_CONFIG_DIR: claudeDir,
+        OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+        OPENCODE_MEMORY_FOREGROUND: "1",
+        OPENCODE_MEMORY_AUTODREAM: "0",
+      },
+    })
+
+    expect(result.status).toBe(0)
+    expect(existsSync(deleteLog)).toBe(false)
   })
 })

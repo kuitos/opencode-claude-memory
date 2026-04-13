@@ -29,6 +29,30 @@ Claude Code writes memory → OpenCode reads it. OpenCode writes memory → Clau
 
 ## 🚀 Quick Start
 
+### Prerequisites
+
+- `opencode`
+- `python3` available in `PATH`
+
+`python3` is a runtime dependency for the wrapper's scoped session detection and fork cleanup logic.
+If it is missing or not executable, post-session maintenance becomes less reliable: session targeting can fall back to less precise heuristics, and fork cleanup is skipped for safety.
+
+Common install commands:
+
+```bash
+# macOS (Homebrew)
+brew install python
+
+# Ubuntu / Debian
+sudo apt-get update && sudo apt-get install -y python3
+
+# Fedora
+sudo dnf install -y python3
+
+# Arch Linux
+sudo pacman -S python
+```
+
 ### 1. Install
 
 ```bash
@@ -40,6 +64,8 @@ This installs:
 - The **plugin** — memory tools + system prompt injection
 - The `opencode-memory` **CLI** — wraps opencode with automatic memory extraction + auto-dream consolidation
 - A **shell hook** — defines an `opencode()` function in your `.zshrc`/`.bashrc` that delegates to `opencode-memory`
+
+If `python3` is not installed yet, install it first using the commands above before enabling the shell hook.
 
 ### 2. Configure
 
@@ -117,6 +143,18 @@ The shell hook defines an `opencode()` function that delegates to `opencode-memo
 7. If the gate passes, it runs a background consolidation pass to merge/prune memories
 8. Maintenance runs **in the background** unless `OPENCODE_MEMORY_FOREGROUND=1`
 9. Terminal maintenance logs are shown in foreground mode by default, or can be forced on/off with `OPENCODE_MEMORY_TERMINAL_LOG=1|0`
+
+### Runtime dependencies
+
+The wrapper expects `python3` to be available at runtime.
+
+It is used for:
+
+- scoped session selection from `opencode session list`
+- parsing `opencode export` output to resolve session directories
+- safely identifying and cleaning up forked extraction / auto-dream sessions
+
+Without `python3`, the plugin tools still load, but wrapper maintenance is degraded and fork cleanup is intentionally skipped to avoid deleting the wrong session.
 
 ### Compatibility details
 
