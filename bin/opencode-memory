@@ -473,6 +473,41 @@ get_latest_session_id() {
   fi
 }
 
+get_opencode_db_path() {
+  printf '%s\n' "$HOME/.local/share/opencode/opencode.db"
+}
+
+get_session_title_from_db() {
+  local session_id="$1"
+  local db_path
+  db_path=$(get_opencode_db_path)
+
+  if [ -z "$session_id" ] || [ ! -f "$db_path" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+
+  python3 - "$db_path" "$session_id" <<'PY'
+import sqlite3
+import sys
+
+db_path, session_id = sys.argv[1:3]
+
+try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    row = conn.execute("SELECT title FROM session WHERE id = ? LIMIT 1", (session_id,)).fetchone()
+except Exception:
+    raise SystemExit(1)
+finally:
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+if row and row[0]:
+    print(row[0])
+PY
+}
+
 get_session_target_id() {
   local before_json="$1"
   local started_at_ms="$2"
@@ -834,6 +869,78 @@ wait_for_session_target_id() {
   wait_for_scoped_session_id_since "$before_json" "$started_at_ms" "$TIMESTAMP_FILE" "$wait_seconds"
 }
 
+get_fork_cleanup_candidate_id() {
+  local started_at_ms="$1"
+  local parent_title="$2"
+  local workdir="$3"
+  local project_dir="$4"
+  local db_path
+  db_path=$(get_opencode_db_path)
+
+  if [ -z "$started_at_ms" ] || [ -z "$parent_title" ] || [ ! -f "$db_path" ] || ! command -v python3 >/dev/null 2>&1; then
+    return 1
+  fi
+
+  python3 - "$db_path" "$started_at_ms" "$parent_title" "$workdir" "$project_dir" <<'PY'
+import os
+import re
+import sqlite3
+import sys
+
+db_path, started_at_ms_raw, parent_title, workdir, project_dir = sys.argv[1:6]
+started_at_ms = int(started_at_ms_raw or "0")
+scope = {os.path.realpath(path) for path in (workdir, project_dir) if path}
+title_pattern = re.compile(rf"^{re.escape(parent_title)} \(fork #\d+\)$")
+
+try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    rows = conn.execute(
+        "SELECT id, title, directory, time_created FROM session WHERE time_created >= ? ORDER BY time_created DESC",
+        (started_at_ms,),
+    ).fetchall()
+except Exception:
+    raise SystemExit(1)
+finally:
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+matches = []
+for session_id, title, directory, time_created in rows:
+    if not session_id or not title or not directory or not time_created:
+        continue
+    if os.path.realpath(directory) not in scope:
+        continue
+    if not title_pattern.match(title):
+        continue
+    matches.append(session_id)
+
+if len(matches) == 1:
+    print(matches[0])
+PY
+}
+
+wait_for_fork_cleanup_candidate_id() {
+  local started_at_ms="$1"
+  local parent_title="$2"
+  local wait_seconds="${3:-5}"
+  local attempt=0
+  local session_id=""
+
+  while [ "$attempt" -lt "$wait_seconds" ]; do
+    session_id=$(get_fork_cleanup_candidate_id "$started_at_ms" "$parent_title" "$WORKING_DIR" "$PROJECT_SCOPE_DIR" || true)
+    if [ -n "$session_id" ]; then
+      printf '%s\n' "$session_id"
+      return 0
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+
+  return 1
+}
+
 file_mtime_secs() {
   local file="$1"
   if [ ! -f "$file" ]; then
@@ -973,11 +1080,10 @@ rollback_consolidation_lock() {
 }
 
 cleanup_forked_sessions() {
-  local before_json="$1"
-  local started_at_ms="$2"
-  local timestamp_file="$3"
+  local started_at_ms="$1"
+  local parent_title="$2"
 
-  if [ -z "$before_json" ] || [ -z "$started_at_ms" ] || [ -z "$timestamp_file" ]; then
+  if [ -z "$started_at_ms" ] || [ -z "$parent_title" ]; then
     return 0
   fi
 
@@ -993,7 +1099,7 @@ PY
   fi
 
   local fork_id
-  fork_id=$(wait_for_scoped_session_id_since "$before_json" "$started_at_ms" "$timestamp_file" "$SESSION_WAIT_SECONDS" 0 || true)
+  fork_id=$(wait_for_fork_cleanup_candidate_id "$started_at_ms" "$parent_title" "$SESSION_WAIT_SECONDS" || true)
 
   [ -n "$fork_id" ] || return 0
 
@@ -1040,6 +1146,9 @@ run_extraction_if_needed() {
   log "Extracting memories from session $session_id..."
   log "Extraction log: $EXTRACT_LOG_FILE"
 
+  local parent_session_title
+  parent_session_title=$(get_session_title_from_db "$session_id" || true)
+
   local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork --dir "$WORKING_DIR")
   if [ -n "$EXTRACT_MODEL" ]; then
     cmd+=(-m "$EXTRACT_MODEL")
@@ -1049,10 +1158,6 @@ run_extraction_if_needed() {
   fi
   cmd+=("$EXTRACT_PROMPT")
 
-  local pre_fork_json
-  pre_fork_json=$(get_session_list_json "$AUTODREAM_SCAN_LIMIT" 2>/dev/null || true)
-  local fork_timestamp_file
-  fork_timestamp_file=$(mktemp)
   local fork_started_at_ms
   fork_started_at_ms=$(( $(date +%s) * 1000 ))
 
@@ -1063,8 +1168,7 @@ run_extraction_if_needed() {
     log "Memory extraction failed (exit code $code). Check $EXTRACT_LOG_FILE for details"
   fi
 
-  cleanup_forked_sessions "$pre_fork_json" "$fork_started_at_ms" "$fork_timestamp_file"
-  rm -f "$fork_timestamp_file"
+  cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
   release_simple_lock "$EXTRACT_LOCK_FILE"
 }
 
@@ -1107,6 +1211,9 @@ run_autodream_if_needed() {
   log "Auto-dream firing (${hours_since}h since last consolidation, ${touched_count} sessions touched)"
   log "Auto-dream log: $AUTODREAM_LOG_FILE"
 
+  local parent_session_title
+  parent_session_title=$(get_session_title_from_db "$session_id" || true)
+
   local cmd=("$REAL_OPENCODE" run -s "$session_id" --fork --dir "$WORKING_DIR")
   if [ -n "$AUTODREAM_MODEL" ]; then
     cmd+=(-m "$AUTODREAM_MODEL")
@@ -1116,10 +1223,6 @@ run_autodream_if_needed() {
   fi
   cmd+=("$AUTODREAM_PROMPT")
 
-  local pre_fork_json
-  pre_fork_json=$(get_session_list_json "$AUTODREAM_SCAN_LIMIT" 2>/dev/null || true)
-  local fork_timestamp_file
-  fork_timestamp_file=$(mktemp)
   local fork_started_at_ms
   fork_started_at_ms=$(( $(date +%s) * 1000 ))
 
@@ -1132,8 +1235,7 @@ run_autodream_if_needed() {
     rollback_consolidation_lock "$CONSOLIDATION_PRIOR_MTIME"
   fi
 
-  cleanup_forked_sessions "$pre_fork_json" "$fork_started_at_ms" "$fork_timestamp_file"
-  rm -f "$fork_timestamp_file"
+  cleanup_forked_sessions "$fork_started_at_ms" "$parent_session_title"
 }
 
 run_post_session_tasks() {
