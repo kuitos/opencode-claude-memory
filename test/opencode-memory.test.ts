@@ -809,13 +809,21 @@ exit 0
     const tmpDir = join(root, "tmp")
     const claudeDir = join(root, "claude")
     const stateFile = join(root, "delete-log")
-    const dbPath = seedSessionDb(homeDir, [
+    const futureBaseMs = Date.now() + 60_000
+    seedSessionDb(homeDir, [
       {
         id: "ses_wrapped_target",
         title: "Wrapped Main Task",
         directory: root,
         timeCreated: 1,
         timeUpdated: 1,
+      },
+      {
+        id: "ses_fork_cleanup_target",
+        title: "Wrapped Main Task (fork #1)",
+        directory: root,
+        timeCreated: futureBaseMs,
+        timeUpdated: futureBaseMs,
       },
     ])
 
@@ -829,7 +837,6 @@ exit 0
       `#!/usr/bin/env bash
 set -euo pipefail
 DELETE_LOG="${stateFile}"
-DB_PATH="${dbPath}"
 if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
   echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}","title":"Wrapped Main Task"}]'
   exit 0
@@ -857,14 +864,19 @@ if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
   exit 0
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
-  now_ms=$(( $(date +%s) * 1000 ))
-  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES ('ses_fork_cleanup_target', NULL, '${root}', 'Wrapped Main Task (fork #1)', $now_ms, $now_ms);"
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
   printf '{"type":"user","content":"fork"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_target.jsonl"
   echo "forked cleanup run"
   exit 0
 fi
 exit 0
+`,
+    )
+
+    writeExecutable(
+      join(fakeBin, "sqlite3"),
+      `#!/usr/bin/env bash
+exit 127
 `,
     )
 
@@ -884,6 +896,7 @@ exit 0
     })
 
     expect(result.status).toBe(0)
+    expect(existsSync(join(claudeDir, "transcripts", "ses_fork_cleanup_target.jsonl"))).toBe(true)
     expect(existsSync(stateFile)).toBe(true)
     expect(readFileSync(stateFile, "utf-8")).toContain("ses_fork_cleanup_target")
   })
@@ -896,13 +909,28 @@ exit 0
     const claudeDir = join(root, "claude")
     const deleteLog = join(root, "delete-log")
     const stateFile = join(root, "state")
-    const dbPath = seedSessionDb(homeDir, [
+    const futureBaseMs = Date.now() + 60_000
+    seedSessionDb(homeDir, [
       {
         id: "ses_wrapped_target",
         title: "Wrapped Main Task",
         directory: root,
         timeCreated: 1,
         timeUpdated: 1,
+      },
+      {
+        id: "ses_fork_cleanup_target",
+        title: "Wrapped Main Task (fork #1)",
+        directory: root,
+        timeCreated: futureBaseMs,
+        timeUpdated: futureBaseMs,
+      },
+      {
+        id: "ses_parallel_real",
+        title: "Parallel normal session",
+        directory: root,
+        timeCreated: futureBaseMs + 1000,
+        timeUpdated: futureBaseMs + 1000,
       },
     ])
 
@@ -917,7 +945,6 @@ exit 0
 set -euo pipefail
 DELETE_LOG="${deleteLog}"
 STATE_FILE="${stateFile}"
-DB_PATH="${dbPath}"
 if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
   if [ ! -f "$STATE_FILE" ]; then
     echo '[{"id":"ses_existing_old","updated":1,"created":1,"directory":"${root}","title":"Existing Session"}]'
@@ -944,9 +971,6 @@ if [ "\${1:-}" != "session" ] && ! { [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s"
   exit 0
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
-  now_ms=$(( $(date +%s) * 1000 ))
-  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES ('ses_fork_cleanup_target', NULL, '${root}', 'Wrapped Main Task (fork #1)', $now_ms, $now_ms);"
-  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES ('ses_parallel_real', NULL, '${root}', 'Parallel normal session', $((now_ms + 1000)), $((now_ms + 1000)));"
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
   printf '{"type":"user","content":"fork"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_target.jsonl"
   sleep 1
@@ -988,13 +1012,28 @@ exit 0
     const tmpDir = join(root, "tmp")
     const claudeDir = join(root, "claude")
     const deleteLog = join(root, "delete-log")
-    const dbPath = seedSessionDb(homeDir, [
+    const futureBaseMs = Date.now() + 60_000
+    seedSessionDb(homeDir, [
       {
         id: "ses_wrapped_target",
         title: "Wrapped Main Task",
         directory: root,
         timeCreated: 1,
         timeUpdated: 1,
+      },
+      {
+        id: "ses_fork_cleanup_one",
+        title: "Wrapped Main Task (fork #1)",
+        directory: root,
+        timeCreated: futureBaseMs,
+        timeUpdated: futureBaseMs,
+      },
+      {
+        id: "ses_fork_cleanup_two",
+        title: "Wrapped Main Task (fork #2)",
+        directory: root,
+        timeCreated: futureBaseMs + 1000,
+        timeUpdated: futureBaseMs + 1000,
       },
     ])
 
@@ -1008,7 +1047,6 @@ exit 0
       `#!/usr/bin/env bash
 set -euo pipefail
 DELETE_LOG="${deleteLog}"
-DB_PATH="${dbPath}"
 if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
   echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}","title":"Wrapped Main Task"}]'
   exit 0
@@ -1030,9 +1068,6 @@ if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
   exit 0
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
-  now_ms=$(( $(date +%s) * 1000 ))
-  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES ('ses_fork_cleanup_one', NULL, '${root}', 'Wrapped Main Task (fork #1)', $now_ms, $now_ms);"
-  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES ('ses_fork_cleanup_two', NULL, '${root}', 'Wrapped Main Task (fork #2)', $((now_ms + 1000)), $((now_ms + 1000)));"
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
   printf '{"type":"user","content":"fork-one"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_one.jsonl"
   sleep 1
@@ -1070,7 +1105,16 @@ exit 0
     const tmpDir = join(root, "tmp")
     const claudeDir = join(root, "claude")
     const deleteLog = join(root, "delete-log")
-    const dbPath = seedSessionDb(homeDir, [])
+    const futureBaseMs = Date.now() + 60_000
+    seedSessionDb(homeDir, [
+      {
+        id: "ses_fork_cleanup_target",
+        title: "Wrapped Main Task (fork #1)",
+        directory: root,
+        timeCreated: futureBaseMs,
+        timeUpdated: futureBaseMs,
+      },
+    ])
 
     mkdirSync(fakeBin, { recursive: true })
     mkdirSync(homeDir, { recursive: true })
@@ -1082,7 +1126,6 @@ exit 0
       `#!/usr/bin/env bash
 set -euo pipefail
 DELETE_LOG="${deleteLog}"
-DB_PATH="${dbPath}"
 if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
   echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}","title":"Wrapped Main Task"}]'
   exit 0
@@ -1104,8 +1147,6 @@ if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
   exit 0
 fi
 if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
-  now_ms=$(( $(date +%s) * 1000 ))
-  sqlite3 "$DB_PATH" "INSERT OR REPLACE INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES ('ses_fork_cleanup_target', NULL, '${root}', 'Wrapped Main Task (fork #1)', $now_ms, $now_ms);"
   mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
   printf '{"type":"user","content":"fork"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_target.jsonl"
   echo "forked cleanup run"
