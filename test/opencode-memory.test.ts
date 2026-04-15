@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite"
 import { afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
@@ -16,6 +17,48 @@ function makeTempRoot(): string {
 function writeExecutable(filePath: string, content: string): void {
   writeFileSync(filePath, content, "utf-8")
   chmodSync(filePath, 0o755)
+}
+
+function seedSessionDb(
+  homeDir: string,
+  rows: Array<{
+    id: string
+    title: string
+    directory: string
+    parentId?: string | null
+    timeCreated?: number
+    timeUpdated?: number
+  }>,
+): string {
+  const dbDir = join(homeDir, ".local", "share", "opencode")
+  const dbPath = join(dbDir, "opencode.db")
+
+  mkdirSync(dbDir, { recursive: true })
+
+  const db = new Database(dbPath)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS session (
+      id TEXT PRIMARY KEY,
+      parent_id TEXT,
+      directory TEXT NOT NULL,
+      title TEXT NOT NULL,
+      time_created INTEGER NOT NULL,
+      time_updated INTEGER NOT NULL
+    )
+  `)
+
+  const insert = db.query(
+    "INSERT OR REPLACE INTO session (id, parent_id, directory, title, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?)",
+  )
+
+  for (const row of rows) {
+    const created = row.timeCreated ?? Date.now()
+    const updated = row.timeUpdated ?? created
+    insert.run(row.id, row.parentId ?? null, row.directory, row.title, created, updated)
+  }
+
+  db.close()
+  return dbPath
 }
 
 afterEach(() => {
@@ -766,6 +809,23 @@ exit 0
     const tmpDir = join(root, "tmp")
     const claudeDir = join(root, "claude")
     const stateFile = join(root, "delete-log")
+    const futureBaseMs = Date.now() + 60_000
+    seedSessionDb(homeDir, [
+      {
+        id: "ses_wrapped_target",
+        title: "Wrapped Main Task",
+        directory: root,
+        timeCreated: 1,
+        timeUpdated: 1,
+      },
+      {
+        id: "ses_fork_cleanup_target",
+        title: "Wrapped Main Task (fork #1)",
+        directory: root,
+        timeCreated: futureBaseMs,
+        timeUpdated: futureBaseMs,
+      },
+    ])
 
     mkdirSync(fakeBin, { recursive: true })
     mkdirSync(homeDir, { recursive: true })
@@ -778,7 +838,7 @@ exit 0
 set -euo pipefail
 DELETE_LOG="${stateFile}"
 if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
-  echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}"}]'
+  echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}","title":"Wrapped Main Task"}]'
   exit 0
 fi
 if [ "\${1:-}" = "export" ]; then
@@ -791,6 +851,289 @@ JSON
 {"info":{"directory":"${root}"}}
 JSON
   fi
+  exit 0
+fi
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "delete" ]; then
+  printf '%s\n' "\${3:-}" >> "$DELETE_LOG"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
+  echo "main run ok"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"fork"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_target.jsonl"
+  echo "forked cleanup run"
+  exit 0
+fi
+exit 0
+`,
+    )
+
+    writeExecutable(
+      join(fakeBin, "sqlite3"),
+      `#!/usr/bin/env bash
+exit 127
+`,
+    )
+
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
+      cwd: root,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        HOME: homeDir,
+        TMPDIR: tmpDir,
+        CLAUDE_CONFIG_DIR: claudeDir,
+        OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+        OPENCODE_MEMORY_FOREGROUND: "1",
+        OPENCODE_MEMORY_AUTODREAM: "0",
+      },
+    })
+
+    expect(result.status).toBe(0)
+    expect(existsSync(join(claudeDir, "transcripts", "ses_fork_cleanup_target.jsonl"))).toBe(true)
+    expect(existsSync(stateFile)).toBe(true)
+    expect(readFileSync(stateFile, "utf-8")).toContain("ses_fork_cleanup_target")
+  })
+
+  test("cleans up only the matching fork-titled session when a newer normal session exists", () => {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const deleteLog = join(root, "delete-log")
+    const stateFile = join(root, "state")
+    const futureBaseMs = Date.now() + 60_000
+    seedSessionDb(homeDir, [
+      {
+        id: "ses_wrapped_target",
+        title: "Wrapped Main Task",
+        directory: root,
+        timeCreated: 1,
+        timeUpdated: 1,
+      },
+      {
+        id: "ses_fork_cleanup_target",
+        title: "Wrapped Main Task (fork #1)",
+        directory: root,
+        timeCreated: futureBaseMs,
+        timeUpdated: futureBaseMs,
+      },
+      {
+        id: "ses_parallel_real",
+        title: "Parallel normal session",
+        directory: root,
+        timeCreated: futureBaseMs + 1000,
+        timeUpdated: futureBaseMs + 1000,
+      },
+    ])
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+DELETE_LOG="${deleteLog}"
+STATE_FILE="${stateFile}"
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  if [ ! -f "$STATE_FILE" ]; then
+    echo '[{"id":"ses_existing_old","updated":1,"created":1,"directory":"${root}","title":"Existing Session"}]'
+  else
+    echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}","title":"Wrapped Main Task"},{"id":"ses_existing_old","updated":1,"created":1,"directory":"${root}","title":"Existing Session"}]'
+  fi
+  exit 0
+fi
+if [ "\${1:-}" = "export" ]; then
+  cat <<'JSON'
+{"info":{"directory":"${root}"}}
+JSON
+  exit 0
+fi
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "delete" ]; then
+  printf '%s\n' "\${3:-}" >> "$DELETE_LOG"
+  exit 0
+fi
+if [ "\${1:-}" != "session" ] && ! { [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; }; then
+  echo wrapped > "$STATE_FILE"
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
+  echo "main run ok"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"fork"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_target.jsonl"
+  sleep 1
+  printf '{"type":"user","content":"parallel"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_parallel_real.jsonl"
+  echo "forked cleanup run"
+  exit 0
+fi
+exit 0
+`,
+    )
+
+    const result = spawnSync("bash", [scriptPath, "--help"], {
+      cwd: root,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        HOME: homeDir,
+        TMPDIR: tmpDir,
+        CLAUDE_CONFIG_DIR: claudeDir,
+        OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+        OPENCODE_MEMORY_FOREGROUND: "1",
+        OPENCODE_MEMORY_AUTODREAM: "0",
+      },
+    })
+
+    expect(result.status).toBe(0)
+    expect(existsSync(deleteLog)).toBe(true)
+
+    const deletedIds = readFileSync(deleteLog, "utf-8")
+    expect(deletedIds).toContain("ses_fork_cleanup_target")
+    expect(deletedIds).not.toContain("ses_parallel_real")
+  })
+
+  test("skips cleanup when multiple fork-titled sessions match the parent title", () => {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const deleteLog = join(root, "delete-log")
+    const futureBaseMs = Date.now() + 60_000
+    seedSessionDb(homeDir, [
+      {
+        id: "ses_wrapped_target",
+        title: "Wrapped Main Task",
+        directory: root,
+        timeCreated: 1,
+        timeUpdated: 1,
+      },
+      {
+        id: "ses_fork_cleanup_one",
+        title: "Wrapped Main Task (fork #1)",
+        directory: root,
+        timeCreated: futureBaseMs,
+        timeUpdated: futureBaseMs,
+      },
+      {
+        id: "ses_fork_cleanup_two",
+        title: "Wrapped Main Task (fork #2)",
+        directory: root,
+        timeCreated: futureBaseMs + 1000,
+        timeUpdated: futureBaseMs + 1000,
+      },
+    ])
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+DELETE_LOG="${deleteLog}"
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}","title":"Wrapped Main Task"}]'
+  exit 0
+fi
+if [ "\${1:-}" = "export" ]; then
+  cat <<'JSON'
+{"info":{"directory":"${root}"}}
+JSON
+  exit 0
+fi
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "delete" ]; then
+  printf '%s\n' "\${3:-}" >> "$DELETE_LOG"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" != "-s" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"wrapped"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_wrapped_target.jsonl"
+  echo "main run ok"
+  exit 0
+fi
+if [ "\${1:-}" = "run" ] && [ "\${2:-}" = "-s" ]; then
+  mkdir -p "$CLAUDE_CONFIG_DIR/transcripts"
+  printf '{"type":"user","content":"fork-one"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_one.jsonl"
+  sleep 1
+  printf '{"type":"user","content":"fork-two"}\n{"type":"tool_use","content":""}\n' > "$CLAUDE_CONFIG_DIR/transcripts/ses_fork_cleanup_two.jsonl"
+  echo "forked cleanup run"
+  exit 0
+fi
+exit 0
+`,
+    )
+
+    const result = spawnSync("bash", [scriptPath, "run", "hello"], {
+      cwd: root,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        HOME: homeDir,
+        TMPDIR: tmpDir,
+        CLAUDE_CONFIG_DIR: claudeDir,
+        OPENCODE_MEMORY_SESSION_WAIT_SECONDS: "1",
+        OPENCODE_MEMORY_FOREGROUND: "1",
+        OPENCODE_MEMORY_AUTODREAM: "0",
+      },
+    })
+
+    expect(result.status).toBe(0)
+    expect(existsSync(deleteLog)).toBe(false)
+  })
+
+  test("skips cleanup when the parent session title cannot be resolved", () => {
+    const root = makeTempRoot()
+    const fakeBin = join(root, "bin")
+    const homeDir = join(root, "home")
+    const tmpDir = join(root, "tmp")
+    const claudeDir = join(root, "claude")
+    const deleteLog = join(root, "delete-log")
+    const futureBaseMs = Date.now() + 60_000
+    seedSessionDb(homeDir, [
+      {
+        id: "ses_fork_cleanup_target",
+        title: "Wrapped Main Task (fork #1)",
+        directory: root,
+        timeCreated: futureBaseMs,
+        timeUpdated: futureBaseMs,
+      },
+    ])
+
+    mkdirSync(fakeBin, { recursive: true })
+    mkdirSync(homeDir, { recursive: true })
+    mkdirSync(tmpDir, { recursive: true })
+    mkdirSync(claudeDir, { recursive: true })
+
+    writeExecutable(
+      join(fakeBin, "opencode"),
+      `#!/usr/bin/env bash
+set -euo pipefail
+DELETE_LOG="${deleteLog}"
+if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "list" ]; then
+  echo '[{"id":"ses_wrapped_target","updated":20,"created":20,"directory":"${root}","title":"Wrapped Main Task"}]'
+  exit 0
+fi
+if [ "\${1:-}" = "export" ]; then
+  cat <<'JSON'
+{"info":{"directory":"${root}"}}
+JSON
   exit 0
 fi
 if [ "\${1:-}" = "session" ] && [ "\${2:-}" = "delete" ]; then
@@ -829,8 +1172,7 @@ exit 0
     })
 
     expect(result.status).toBe(0)
-    expect(existsSync(stateFile)).toBe(true)
-    expect(readFileSync(stateFile, "utf-8")).toContain("ses_fork_cleanup_target")
+    expect(existsSync(deleteLog)).toBe(false)
   })
 
   test("skips fork cleanup safely when python3 is unavailable", () => {
