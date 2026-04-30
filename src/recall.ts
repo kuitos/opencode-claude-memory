@@ -17,9 +17,79 @@ const MAX_MEMORY_LINES = 200
 const MAX_MEMORY_BYTES = 4096
 
 const encoder = new TextEncoder()
+const QUERY_STOP_WORDS = new Set([
+  "the",
+  "and",
+  "for",
+  "with",
+  "this",
+  "that",
+  "what",
+  "when",
+  "where",
+  "which",
+  "who",
+  "why",
+  "how",
+  "should",
+  "would",
+  "could",
+  "please",
+  "about",
+  "again",
+  "into",
+  "from",
+  "have",
+  "know",
+  "need",
+  "only",
+  "over",
+  "tell",
+  "than",
+  "then",
+  "them",
+  "they",
+  "will",
+  "your",
+  "you",
+  "are",
+  "can",
+  "did",
+  "has",
+  "her",
+  "him",
+  "his",
+  "its",
+  "not",
+  "our",
+  "out",
+  "she",
+  "was",
+  "were",
+  "all",
+  "any",
+  "but",
+  "get",
+  "had",
+  "in",
+  "is",
+  "it",
+  "of",
+  "on",
+  "or",
+  "to",
+])
 
 function tokenizeQuery(query: string): string[] {
-  return [...new Set(query.toLowerCase().split(/\s+/).map((token) => token.trim()).filter((token) => token.length >= 2))]
+  return [
+    ...new Set(
+      query
+        .toLowerCase()
+        .split(/[^a-z0-9_]+/)
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 2 && !QUERY_STOP_WORDS.has(token)),
+    ),
+  ]
 }
 
 function readMemoryContent(filePath: string): string {
@@ -121,7 +191,8 @@ export function recallRelevantMemories(
     }
   }).filter(({ header, content }) => !isToolReferenceMemory(header, content, recentTools))
 
-  if (terms.length > 0 && scored.some((s) => s.score > 0)) {
+  if (terms.length > 0) {
+    if (!scored.some((s) => s.score > 0)) return []
     scored.sort((a, b) => b.score - a.score || b.header.mtimeMs - a.header.mtimeMs)
   } else {
     scored.sort((a, b) => b.header.mtimeMs - a.header.mtimeMs)
