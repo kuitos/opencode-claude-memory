@@ -19,6 +19,7 @@
     "dist"
   ],
   "scripts": {
+    "eval:memory": "bun test/evals/run.ts",
     "build": "tsc -p tsconfig.json",
     "prepack": "npm run build"
   },

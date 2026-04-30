@@ -268,11 +268,19 @@ Supported memory types:
 # Run tests
 bun test
 
+# Run the focused memory-effect task eval harness
+bun test test/evals/task-eval.test.ts
+
+# Print a memory-effect eval report
+bun run eval:memory
+
 # Build published artifacts
 bun run build
 
 # Release: push to main triggers semantic-release → npm publish
 ```
+
+Task eval fixtures now support both in-code synthetic cases and file-backed replay cases under `test/evals/cases/*.json`.
 
 ## 📄 License
 

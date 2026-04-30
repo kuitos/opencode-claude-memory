@@ -93,6 +93,47 @@ describe("recallRelevantMemories", () => {
     expect(result[0]!.fileName).toBe("auth.md")
   })
 
+  test("returns no memories when a query has no matches", () => {
+    const repo = makeTempGitRepo()
+    const memDir = getMemoryDir(repo)
+
+    writeMemoryFile(
+      memDir,
+      "testing.md",
+      { name: "Testing Preference", description: "Database test guidance", type: "feedback" },
+      "Never mock database integration tests.",
+      new Date("2026-04-30"),
+    )
+
+    const result = recallRelevantMemories(repo, "rename README CLI flag")
+
+    expect(result).toEqual([])
+  })
+
+  test("keeps meaningful short query terms", () => {
+    const repo = makeTempGitRepo()
+    const memDir = getMemoryDir(repo)
+
+    writeMemoryFile(
+      memDir,
+      "go_user.md",
+      { name: "Go Expertise", description: "User writes Go services", type: "user" },
+      "User has deep Go backend experience.",
+      new Date("2026-04-01"),
+    )
+    writeMemoryFile(
+      memDir,
+      "recent_unrelated.md",
+      { name: "Recent Unrelated", description: "Latest unrelated note", type: "project" },
+      "Latest project note about release coordination.",
+      new Date("2026-04-30"),
+    )
+
+    const result = recallRelevantMemories(repo, "Go")
+
+    expect(result[0]!.fileName).toBe("go_user.md")
+  })
+
   test("matches query against frontmatter name", () => {
     const repo = makeTempGitRepo()
     const memDir = getMemoryDir(repo)

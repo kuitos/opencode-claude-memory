@@ -1,0 +1,232 @@
+{
+  "cases": [
+    {
+      "id": "negative-unrelated-query-does-not-recall-recent-feedback",
+      "description": "ordinary unrelated requests should not inject the most recent memory just because no keyword matched",
+      "memories": [
+        {
+          "fileName": "feedback_database_tests",
+          "name": "Database Test Preference",
+          "description": "Do not mock database tests",
+          "type": "feedback",
+          "content": "Never mock the database in integration tests.\n\n**Why:** Mocked tests hid a broken migration.\n**How to apply:** Use a real test database for DB-facing tests.",
+          "mtime": "2026-04-30T00:00:00.000Z"
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "text": "Please rename the CLI flag in the README."
+            }
+          ]
+        }
+      ],
+      "checks": {
+        "onContains": [
+          "## MEMORY.md",
+          "Database Test Preference"
+        ],
+        "onNotContains": [
+          "## Recalled Memories",
+          "Never mock the database in integration tests."
+        ],
+        "offContains": [
+          "# Auto Memory"
+        ],
+        "offNotContains": [
+          "## MEMORY.md",
+          "Database Test Preference",
+          "Never mock the database in integration tests."
+        ]
+      }
+    },
+    {
+      "id": "competition-prefers-token-rotation-memories",
+      "description": "when many memories compete, query-relevant token rotation memories should displace distractors",
+      "memories": [
+        {
+          "fileName": "auth_rotation_owner",
+          "name": "Auth Token Rotation Owner",
+          "description": "Auth token rotation is owned by platform security",
+          "type": "project",
+          "content": "Platform security owns auth token rotation incidents.\n\n**Why:** They operate the rotation service.\n**How to apply:** Route auth token rotation questions to that context.",
+          "mtime": "2026-04-01T00:00:00.000Z"
+        },
+        {
+          "fileName": "auth_rotation_deadline",
+          "name": "Auth Token Rotation Deadline",
+          "description": "Auth token rotation deadline is 2026-05-15",
+          "type": "project",
+          "content": "Auth token rotation cleanup must land by 2026-05-15.\n\n**Why:** Downstream services depend on the new signing keys.\n**How to apply:** Prefer low-risk auth token rotation changes.",
+          "mtime": "2026-04-02T00:00:00.000Z"
+        },
+        {
+          "fileName": "auth_rotation_dashboard",
+          "name": "Auth Token Rotation Dashboard",
+          "description": "Auth token rotation metrics live in the security dashboard",
+          "type": "reference",
+          "content": "The auth token rotation dashboard is security.example/d/token-rotation.",
+          "mtime": "2026-04-03T00:00:00.000Z"
+        },
+        {
+          "fileName": "auth_rotation_tests",
+          "name": "Auth Token Rotation Tests",
+          "description": "Auth token rotation tests must cover rollback",
+          "type": "feedback",
+          "content": "Auth token rotation changes must include rollback-path tests.\n\n**Why:** Prior incidents failed during key rollback.\n**How to apply:** Check rollback behavior before approving.",
+          "mtime": "2026-04-04T00:00:00.000Z"
+        },
+        {
+          "fileName": "auth_rotation_rollout",
+          "name": "Auth Token Rotation Rollout",
+          "description": "Auth token rotation rollout is staged by region",
+          "type": "project",
+          "content": "Auth token rotation rolls out by region, starting with us-east.\n\n**Why:** It limits blast radius.\n**How to apply:** Avoid all-region rollout assumptions.",
+          "mtime": "2026-04-05T00:00:00.000Z"
+        },
+        {
+          "fileName": "frontend_theme",
+          "name": "Frontend Theme",
+          "description": "Dashboard theme preference",
+          "type": "feedback",
+          "content": "Use compact tables for dashboard screens.",
+          "mtime": "2026-04-30T00:00:00.000Z"
+        },
+        {
+          "fileName": "mobile_release",
+          "name": "Mobile Release",
+          "description": "Mobile release branch timing",
+          "type": "project",
+          "content": "Mobile release branch cuts on Fridays.",
+          "mtime": "2026-04-29T00:00:00.000Z"
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "text": "What should I know before touching auth token rotation?"
+            }
+          ]
+        }
+      ],
+      "checks": {
+        "onContains": [
+          "Auth token rotation cleanup must land by 2026-05-15.",
+          "Auth token rotation changes must include rollback-path tests.",
+          "Auth token rotation rolls out by region",
+          "The auth token rotation dashboard is security.example/d/token-rotation.",
+          "Platform security owns auth token rotation incidents."
+        ],
+        "onNotContains": [
+          "Use compact tables for dashboard screens.",
+          "Mobile release branch cuts on Fridays."
+        ],
+        "offContains": [
+          "# Auto Memory"
+        ],
+        "offNotContains": [
+          "Auth token rotation cleanup must land by 2026-05-15.",
+          "Use compact tables for dashboard screens.",
+          "Mobile release branch cuts on Fridays."
+        ]
+      }
+    },
+    {
+      "id": "stale-memory-includes-age-warning",
+      "description": "old recalled memories should include an age warning before the agent relies on them",
+      "memories": [
+        {
+          "fileName": "legacy_flag",
+          "name": "Legacy Flag",
+          "description": "Legacy auth flag was used by old rollout",
+          "type": "project",
+          "content": "The legacy_auth_rollout flag controlled the auth rollout.\n\n**Why:** It was the switch used during the original migration.\n**How to apply:** Verify the flag still exists before recommending it.",
+          "mtime": "2024-01-01T00:00:00.000Z"
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "text": "Is there old context about the legacy auth flag?"
+            }
+          ]
+        }
+      ],
+      "checks": {
+        "onContains": [
+          "Legacy Flag",
+          "This memory is",
+          "days old",
+          "Verify against current code before asserting as fact.",
+          "legacy_auth_rollout flag controlled the auth rollout."
+        ],
+        "offContains": [
+          "# Auto Memory"
+        ],
+        "offNotContains": [
+          "legacy_auth_rollout flag controlled the auth rollout.",
+          "This memory is"
+        ]
+      }
+    },
+    {
+      "id": "already-surfaced-memory-is-not-recalled-again",
+      "description": "memory already shown in a prior system prompt should not be re-injected after messages.transform sees it",
+      "memories": [
+        {
+          "fileName": "billing_regression_checklist",
+          "name": "Billing Regression Checklist",
+          "description": "Billing handler edits require the regression checklist",
+          "type": "feedback",
+          "content": "Use the billing regression checklist before editing billing handlers.\n\n**Why:** Billing regressions are costly.\n**How to apply:** Run the checklist before changing billing handler code."
+        }
+      ],
+      "messages": [
+        {
+          "role": "system",
+          "parts": [
+            {
+              "type": "text",
+              "text": "# Auto Memory\n\n## Recalled Memories\n\n### Billing Regression Checklist (feedback)\nUse the billing regression checklist before editing billing handlers."
+            }
+          ]
+        },
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "text": "I'm editing billing handlers; what should I check?"
+            }
+          ]
+        }
+      ],
+      "checks": {
+        "onContains": [
+          "## MEMORY.md",
+          "Billing Regression Checklist"
+        ],
+        "onNotContains": [
+          "## Recalled Memories",
+          "Run the checklist before changing billing handler code."
+        ],
+        "offContains": [
+          "# Auto Memory"
+        ],
+        "offNotContains": [
+          "## MEMORY.md",
+          "Run the checklist before changing billing handler code."
+        ]
+      }
+    }
+  ]
+}

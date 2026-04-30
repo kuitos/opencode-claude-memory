@@ -1,0 +1,45 @@
+{
+  "cases": [
+    {
+      "id": "sanitized-replay-merge-freeze",
+      "description": "sanitized replay fixture showing project context recall from a file-backed case",
+      "memories": [
+        {
+          "fileName": "project_freeze",
+          "name": "Merge Freeze",
+          "description": "Merge freeze starts 2026-04-10",
+          "type": "project",
+          "content": "Mobile team cutting release branch.\n\n**Why:** Prevent destabilizing the release cut.\n**How to apply:** Hold non-critical PRs until the freeze lifts."
+        }
+      ],
+      "messages": [
+        {
+          "role": "user",
+          "parts": [
+            {
+              "type": "text",
+              "text": "Can we merge this cleanup PR next week, or is there any release constraint I should factor in?"
+            }
+          ]
+        }
+      ],
+      "checks": {
+        "onContains": [
+          "## MEMORY.md",
+          "Merge Freeze",
+          "## Recalled Memories",
+          "Hold non-critical PRs until the freeze lifts."
+        ],
+        "offContains": [
+          "# Auto Memory"
+        ],
+        "offNotContains": [
+          "## MEMORY.md",
+          "Merge Freeze",
+          "## Recalled Memories",
+          "Hold non-critical PRs until the freeze lifts."
+        ]
+      }
+    }
+  ]
+}
