@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "fs"
+import { mkdtempSync, mkdirSync, rmSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { saveMemory, deleteMemory, listMemories, searchMemories, readMemory, readIndex } from "../src/memory.js"
-import { recallRelevantMemories, formatRecalledMemories } from "../src/recall.js"
+import { recallSelectedMemories, formatRecalledMemories } from "../src/recall.js"
+import { scanMemoryFiles } from "../src/memoryScan.js"
 import { buildMemorySystemPrompt } from "../src/prompt.js"
-import { getMemoryDir, getMemoryEntrypoint } from "../src/paths.js"
+import { getMemoryDir } from "../src/paths.js"
 
 const tempDirs: string[] = []
 
@@ -22,6 +23,10 @@ afterEach(() => {
     if (dir) rmSync(dir, { recursive: true, force: true })
   }
 })
+
+function recallByFilename(repo: string, filenames: string[], alreadySurfaced: ReadonlySet<string> = new Set()) {
+  return recallSelectedMemories(scanMemoryFiles(getMemoryDir(repo)), filenames, alreadySurfaced)
+}
 
 describe("end-to-end memory lifecycle", () => {
   test("save → list → search → read → recall → delete", () => {
@@ -69,7 +74,7 @@ describe("end-to-end memory lifecycle", () => {
     expect(index).toContain("feedback_testing.md")
     expect(index).toContain("project_freeze.md")
 
-    const recalled = recallRelevantMemories(repo, "testing database mock")
+    const recalled = recallByFilename(repo, ["feedback_testing.md"])
     expect(recalled.length).toBeGreaterThan(0)
     expect(recalled[0]!.name).toBe("Testing Approach")
 
@@ -99,7 +104,7 @@ describe("end-to-end memory lifecycle", () => {
       "This should appear in recalled section",
     )
 
-    const recalled = recallRelevantMemories(repo, "prompt integration")
+    const recalled = recallByFilename(repo, ["prompt_test.md"])
     const recalledSection = formatRecalledMemories(recalled)
     const prompt = buildMemorySystemPrompt(repo, recalledSection)
 
@@ -115,7 +120,7 @@ describe("end-to-end memory lifecycle", () => {
     saveMemory(repo, "seen", "Already Seen", "Was shown before", "user", "Already surfaced content")
     saveMemory(repo, "unseen", "Not Seen", "Fresh content", "feedback", "New content")
 
-    const result = recallRelevantMemories(repo, undefined, new Set(["Already Seen|user"]))
+    const result = recallByFilename(repo, ["seen.md", "unseen.md"], new Set(["Already Seen|user"]))
 
     expect(result).toHaveLength(1)
     expect(result[0]!.name).toBe("Not Seen")

@@ -165,7 +165,7 @@ Key modules ported from Claude Code's `src/memdir/`:
 | Module | Source | Purpose |
 |---|---|---|
 | `memoryScan.ts` | `memoryScan.ts` | Recursive directory scan + frontmatter header parsing |
-| `recall.ts` | `findRelevantMemories.ts` | Memory recall via keyword scoring (heuristic, no LLM side-query) |
+| `recall.ts` + `recallSelector.ts` | `findRelevantMemories.ts` | LLM-selected memory recall + selected memory formatting |
 | `prompt.ts` | `memoryTypes.ts` + `memdir.ts` | System prompt sections, type taxonomy, truncation |
 | `memory.ts` | `memdir.ts` | `truncateEntrypoint()` aligned with `truncateEntrypointContent()` |
 

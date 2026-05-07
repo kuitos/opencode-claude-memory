@@ -1,6 +1,5 @@
 import { readFileSync } from "fs"
-import { scanMemoryFiles, type MemoryHeader } from "./memoryScan.js"
-import { getMemoryDir } from "./paths.js"
+import type { MemoryHeader } from "./memoryScan.js"
 
 export type RecalledMemory = {
   fileName: string
@@ -17,82 +16,6 @@ const MAX_MEMORY_LINES = 200
 const MAX_MEMORY_BYTES = 4096
 
 const encoder = new TextEncoder()
-// Used only by the legacy recallRelevantMemories() keyword selector. The
-// plugin prefetch path uses the LLM selector and does not tokenize queries.
-const QUERY_STOP_WORDS = new Set([
-  "the",
-  "and",
-  "for",
-  "with",
-  "this",
-  "that",
-  "what",
-  "when",
-  "where",
-  "which",
-  "who",
-  "why",
-  "how",
-  "should",
-  "would",
-  "could",
-  "please",
-  "about",
-  "again",
-  "into",
-  "from",
-  "have",
-  "know",
-  "need",
-  "only",
-  "over",
-  "tell",
-  "than",
-  "then",
-  "them",
-  "they",
-  "will",
-  "your",
-  "you",
-  "are",
-  "can",
-  "did",
-  "has",
-  "her",
-  "him",
-  "his",
-  "its",
-  "not",
-  "our",
-  "out",
-  "she",
-  "was",
-  "were",
-  "all",
-  "any",
-  "but",
-  "get",
-  "had",
-  "in",
-  "is",
-  "it",
-  "of",
-  "on",
-  "or",
-  "to",
-])
-
-function tokenizeQuery(query: string): string[] {
-  return [
-    ...new Set(
-      query
-        .toLowerCase()
-        .split(/[^a-z0-9_]+/)
-        .map((token) => token.trim())
-        .filter((token) => token.length >= 2 && !QUERY_STOP_WORDS.has(token)),
-    ),
-  ]
-}
 
 function readMemoryContent(filePath: string): string {
   try {
@@ -112,24 +35,6 @@ function readMemoryContent(filePath: string): string {
   } catch {
     return ""
   }
-}
-
-function scoreHeader(header: MemoryHeader, content: string, terms: string[]): number {
-  if (terms.length === 0) return 0
-
-  const nameHaystack = (header.name ?? "").toLowerCase()
-  const descHaystack = (header.description ?? "").toLowerCase()
-  const filenameHaystack = header.filename.toLowerCase()
-  const contentHaystack = content.toLowerCase()
-
-  let score = 0
-  for (const term of terms) {
-    if (nameHaystack.includes(term)) score += 3
-    if (descHaystack.includes(term)) score += 3
-    if (filenameHaystack.includes(term)) score += 1
-    if (contentHaystack.includes(term)) score += 1
-  }
-  return score
 }
 
 function truncateMemoryContent(content: string): string {
@@ -195,57 +100,6 @@ export function recallSelectedMemories(
   }
 
   return recalled
-}
-
-// Legacy local selector retained for direct API/tests. The plugin path uses
-// recallSelectedMemories() with the LLM selector in recallSelector.ts.
-function isToolReferenceMemory(header: MemoryHeader, content: string, recentTools: readonly string[]): boolean {
-  if (recentTools.length === 0) return false
-  const type = header.type
-  if (type !== "reference") return false
-
-  const haystack = `${header.name ?? ""}\n${header.description ?? ""}\n${content}`.toLowerCase()
-  const warningSignals = ["warning", "gotcha", "issue", "bug", "caveat", "pitfall", "known issue"]
-  if (warningSignals.some((w) => haystack.includes(w))) return false
-
-  const toolHaystack = recentTools.map((t) => t.toLowerCase())
-  return toolHaystack.some((tool) => haystack.includes(tool))
-}
-
-export function recallRelevantMemories(
-  worktree: string,
-  query?: string,
-  alreadySurfaced: ReadonlySet<string> = new Set(),
-  recentTools: readonly string[] = [],
-): RecalledMemory[] {
-  const memoryDir = getMemoryDir(worktree)
-  const headers = scanMemoryFiles(memoryDir).filter(
-    (h) => !alreadySurfaced.has(memorySurfaceKey(h)),
-  )
-  if (headers.length === 0) return []
-
-  const now = Date.now()
-  const terms = query ? tokenizeQuery(query) : []
-
-  const scored = headers.map((header) => {
-    const content = readMemoryContent(header.filePath)
-    return {
-      header,
-      content,
-      score: scoreHeader(header, content, terms),
-    }
-  }).filter(({ header, content }) => !isToolReferenceMemory(header, content, recentTools))
-
-  if (terms.length > 0) {
-    if (!scored.some((s) => s.score > 0)) return []
-    scored.sort((a, b) => b.score - a.score || b.header.mtimeMs - a.header.mtimeMs)
-  } else {
-    scored.sort((a, b) => b.header.mtimeMs - a.header.mtimeMs)
-  }
-
-  return scored
-    .slice(0, MAX_RECALLED_MEMORIES)
-    .map(({ header, content }) => recalledMemoryFromHeader(header, content, now))
 }
 
 function formatAgeWarning(ageInDays: number): string {

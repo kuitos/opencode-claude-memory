@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, utimesSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
-import { recallRelevantMemories, formatRecalledMemories, type RecalledMemory } from "../src/recall.js"
+import { formatRecalledMemories, recallSelectedMemories, type RecalledMemory } from "../src/recall.js"
+import { scanMemoryFiles } from "../src/memoryScan.js"
 import { getMemoryDir } from "../src/paths.js"
 
 const tempDirs: string[] = []
@@ -30,6 +31,10 @@ function writeMemoryFile(
   }
 }
 
+function scan(repo: string) {
+  return scanMemoryFiles(getMemoryDir(repo))
+}
+
 afterEach(() => {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()
@@ -37,14 +42,14 @@ afterEach(() => {
   }
 })
 
-describe("recallRelevantMemories", () => {
-  test("returns empty array when no memories exist", () => {
+describe("recallSelectedMemories", () => {
+  test("returns empty array for empty selections", () => {
     const repo = makeTempGitRepo()
-    const result = recallRelevantMemories(repo)
+    const result = recallSelectedMemories(scan(repo), [])
     expect(result).toEqual([])
   })
 
-  test("returns memories sorted by mtime when no query", () => {
+  test("materializes selected filenames in selector order", () => {
     const repo = makeTempGitRepo()
     const memDir = getMemoryDir(repo)
 
@@ -63,62 +68,16 @@ describe("recallRelevantMemories", () => {
       new Date("2025-06-01"),
     )
 
-    const result = recallRelevantMemories(repo)
+    const result = recallSelectedMemories(scan(repo), ["old.md", "new.md"])
     expect(result).toHaveLength(2)
-    expect(result[0]!.fileName).toBe("new.md")
-    expect(result[1]!.fileName).toBe("old.md")
+    expect(result[0]!.fileName).toBe("old.md")
+    expect(result[0]!.name).toBe("Old Memory")
+    expect(result[0]!.type).toBe("user")
+    expect(result[0]!.content).toBe("Old content")
+    expect(result[1]!.fileName).toBe("new.md")
   })
 
-  test("scores and ranks by query relevance", () => {
-    const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
-
-    writeMemoryFile(
-      memDir,
-      "auth.md",
-      { name: "Auth Config", description: "Authentication setup", type: "project" },
-      "JWT tokens and auth middleware",
-      new Date("2024-01-01"),
-    )
-    writeMemoryFile(
-      memDir,
-      "style.md",
-      { name: "Code Style", description: "Formatting rules", type: "feedback" },
-      "Use prettier with tabs",
-      new Date("2025-06-01"),
-    )
-
-    const result = recallRelevantMemories(repo, "authentication JWT")
-    expect(result).toHaveLength(2)
-    expect(result[0]!.fileName).toBe("auth.md")
-  })
-
-  test("matches query against frontmatter name", () => {
-    const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
-
-    writeMemoryFile(
-      memDir,
-      "auth.md",
-      { name: "Auth Config", description: "Setup note", type: "project" },
-      "Implementation details unrelated to title search",
-      new Date("2024-01-01"),
-    )
-    writeMemoryFile(
-      memDir,
-      "newer.md",
-      { name: "Recent Note", description: "More recent but not matching title", type: "user" },
-      "Fresh unrelated content",
-      new Date("2025-06-01"),
-    )
-
-    const result = recallRelevantMemories(repo, "Auth Config")
-    expect(result).toHaveLength(2)
-    expect(result[0]!.fileName).toBe("auth.md")
-    expect(result[0]!.name).toBe("Auth Config")
-  })
-
-  test("respects alreadySurfaced filter", () => {
+  test("filters missing, duplicate, and already surfaced selections", () => {
     const repo = makeTempGitRepo()
     const memDir = getMemoryDir(repo)
 
@@ -131,17 +90,21 @@ describe("recallRelevantMemories", () => {
     writeMemoryFile(
       memDir,
       "fresh.md",
-      { name: "Fresh", description: "Not yet shown", type: "user" },
+      { name: "Fresh", description: "Not yet shown", type: "feedback" },
       "Fresh content",
     )
 
-    const result = recallRelevantMemories(repo, undefined, new Set(["Already Shown|user"]))
+    const result = recallSelectedMemories(
+      scan(repo),
+      ["missing.md", "surfaced.md", "fresh.md", "fresh.md"],
+      new Set(["Already Shown|user"]),
+    )
 
     expect(result).toHaveLength(1)
     expect(result[0]!.fileName).toBe("fresh.md")
   })
 
-  test("limits to MAX_RECALLED_MEMORIES (5)", () => {
+  test("limits selected memories to five", () => {
     const repo = makeTempGitRepo()
     const memDir = getMemoryDir(repo)
 
@@ -151,46 +114,41 @@ describe("recallRelevantMemories", () => {
         `mem_${i}.md`,
         { name: `Memory ${i}`, description: `Desc ${i}`, type: "user" },
         `Content ${i}`,
-        new Date(Date.now() - i * 86400_000),
       )
     }
 
-    const result = recallRelevantMemories(repo)
+    const result = recallSelectedMemories(
+      scan(repo),
+      Array.from({ length: 10 }, (_, i) => `mem_${i}.md`),
+    )
     expect(result).toHaveLength(5)
+    expect(result.map((memory) => memory.fileName)).toEqual([
+      "mem_0.md",
+      "mem_1.md",
+      "mem_2.md",
+      "mem_3.md",
+      "mem_4.md",
+    ])
   })
 
-  test("extracts name from filename when no frontmatter name", () => {
+  test("extracts filename name and default type when frontmatter is absent", () => {
     const repo = makeTempGitRepo()
     const memDir = getMemoryDir(repo)
-
     writeFileSync(join(memDir, "plain_note.md"), "Just plain text, no frontmatter\n", "utf-8")
 
-    const result = recallRelevantMemories(repo)
+    const result = recallSelectedMemories(scan(repo), ["plain_note.md"])
     expect(result).toHaveLength(1)
     expect(result[0]!.name).toBe("plain_note")
+    expect(result[0]!.type).toBe("user")
+    expect(result[0]!.content).toBe("Just plain text, no frontmatter")
+    expect(result[0]!.filePath).toContain("plain_note.md")
   })
 
-  test("prefers frontmatter name over filename slug", () => {
+  test("calculates ageInDays from memory mtime", () => {
     const repo = makeTempGitRepo()
     const memDir = getMemoryDir(repo)
-
-    writeMemoryFile(
-      memDir,
-      "slug_only.md",
-      { name: "Readable Title", description: "Named memory", type: "user" },
-      "Named content",
-    )
-
-    const result = recallRelevantMemories(repo)
-    expect(result).toHaveLength(1)
-    expect(result[0]!.name).toBe("Readable Title")
-  })
-
-  test("calculates ageInDays correctly", () => {
-    const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
-
     const threeDaysAgo = new Date(Date.now() - 3 * 86400_000)
+
     writeMemoryFile(
       memDir,
       "aged.md",
@@ -199,120 +157,9 @@ describe("recallRelevantMemories", () => {
       threeDaysAgo,
     )
 
-    const result = recallRelevantMemories(repo)
+    const result = recallSelectedMemories(scan(repo), ["aged.md"])
     expect(result).toHaveLength(1)
     expect(result[0]!.ageInDays).toBe(3)
-  })
-
-  test("defaults type to 'user' when missing", () => {
-    const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
-
-    writeMemoryFile(
-      memDir,
-      "notype.md",
-      { name: "No Type", description: "Missing type field" },
-      "Content without type",
-    )
-
-    const result = recallRelevantMemories(repo)
-    expect(result).toHaveLength(1)
-    expect(result[0]!.type).toBe("user")
-  })
-
-  test("includes filePath in recalled memory", () => {
-    const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
-
-    writeMemoryFile(
-      memDir,
-      "with_path.md",
-      { name: "Path Test", description: "Has file path", type: "user" },
-      "Test content",
-    )
-
-    const result = recallRelevantMemories(repo)
-    expect(result).toHaveLength(1)
-    expect(result[0]!.filePath).toContain("with_path.md")
-    expect(result[0]!.filePath).toContain(memDir)
-  })
-
-  test("weights name and description matches higher than content", () => {
-    const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
-
-    writeMemoryFile(
-      memDir,
-      "desc_match.md",
-      { name: "Auth Config", description: "Authentication setup details", type: "project" },
-      "Unrelated body text about nothing",
-      new Date("2024-01-01"),
-    )
-    writeMemoryFile(
-      memDir,
-      "body_match.md",
-      { name: "Other Note", description: "Random unrelated description", type: "user" },
-      "The authentication setup is here",
-      new Date("2025-06-01"),
-    )
-
-    const result = recallRelevantMemories(repo, "authentication")
-    expect(result).toHaveLength(2)
-    expect(result[0]!.fileName).toBe("desc_match.md")
-  })
-
-  test("filters out reference memories for recently used tools", () => {
-    const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
-
-    writeMemoryFile(
-      memDir,
-      "grep_ref.md",
-      { name: "Grep Tool API", description: "Usage reference for grep tool", type: "reference" },
-      "How to use the grep tool with various options",
-    )
-    writeMemoryFile(
-      memDir,
-      "other.md",
-      { name: "Project Setup", description: "Project configuration", type: "project" },
-      "General project info",
-    )
-
-    const result = recallRelevantMemories(repo, undefined, new Set(), ["grep"])
-    expect(result).toHaveLength(1)
-    expect(result[0]!.fileName).toBe("other.md")
-  })
-
-  test("keeps warning/gotcha reference memories even for recently used tools", () => {
-    const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
-
-    writeMemoryFile(
-      memDir,
-      "grep_warning.md",
-      { name: "Grep Known Issues", description: "Warning about grep tool edge cases", type: "reference" },
-      "Known issue: grep fails on binary files",
-    )
-
-    const result = recallRelevantMemories(repo, undefined, new Set(), ["grep"])
-    expect(result).toHaveLength(1)
-    expect(result[0]!.fileName).toBe("grep_warning.md")
-  })
-
-  test("does not filter non-reference memories for recently used tools", () => {
-    const repo = makeTempGitRepo()
-    const memDir = getMemoryDir(repo)
-
-    writeMemoryFile(
-      memDir,
-      "grep_feedback.md",
-      { name: "Grep Preferences", description: "User prefers grep over find", type: "feedback" },
-      "Always use grep for searching",
-    )
-
-    const result = recallRelevantMemories(repo, undefined, new Set(), ["grep"])
-    expect(result).toHaveLength(1)
-    expect(result[0]!.fileName).toBe("grep_feedback.md")
   })
 })
 
@@ -394,12 +241,14 @@ describe("formatRecalledMemories", () => {
         type: "feedback",
         description: "Second",
         content: "Content B",
-        ageInDays: 0,
+        ageInDays: 2,
       },
     ]
 
     const result = formatRecalledMemories(memories)
-    expect(result).toContain("### Memory A (user)")
-    expect(result).toContain("### Memory B (feedback)")
+    expect(result).toContain("Memory A")
+    expect(result).toContain("Memory B")
+    expect(result).toContain("Content A")
+    expect(result).toContain("Content B")
   })
 })
