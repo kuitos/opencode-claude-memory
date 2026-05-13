@@ -15,7 +15,7 @@ function header(filename: string, description: string): MemoryHeader {
 }
 
 describe("selectRelevantMemoryFilenames", () => {
-  test("throws a clear error when the session client does not support v2 structured output", async () => {
+  test("throws a clear error when the session client cannot create, prompt, and delete sessions", async () => {
     const calls: string[] = []
     const selectorSessionIDs = new Set<string>()
     const client = {
@@ -23,10 +23,6 @@ describe("selectRelevantMemoryFilenames", () => {
         async create(_options: unknown) {
           calls.push("create")
           return { data: { id: "selector-session" } }
-        },
-        async prompt(_options: unknown) {
-          calls.push("prompt")
-          return { data: { parts: [] } }
         },
         async delete(_options: unknown) {
           calls.push("delete")
@@ -52,35 +48,30 @@ describe("selectRelevantMemoryFilenames", () => {
     }
 
     expect(error).toBeInstanceOf(Error)
-    expect((error as Error).message).toContain("requires an OpenCode SDK with structured output session.prompt support")
+    expect((error as Error).message).toContain("requires an OpenCode SDK session client with create/prompt/delete support")
     expect(calls).toEqual([])
     expect(selectorSessionIDs.size).toBe(0)
   })
 
-  test("asks a temporary child session for structured filenames and deletes it", async () => {
+  test("supports the current default OpenCode SDK session client shape", async () => {
     const calls: Array<{ method: string; options: unknown }> = []
     const selectorSessionIDs = new Set<string>()
     const client = {
       session: {
-        async create(options: unknown, _requestOptions?: unknown) {
+        async create(options: unknown) {
           calls.push({ method: "create", options })
           return { data: { id: "selector-session" } }
         },
-        async prompt(options: unknown, _requestOptions?: unknown) {
+        async prompt(options: unknown) {
           calls.push({ method: "prompt", options })
           expect(selectorSessionIDs.has("selector-session")).toBe(true)
           return {
             data: {
-              info: {
-                structured: {
-                  selected_memories: ["testing.md", "missing.md"],
-                },
-              },
-              parts: [],
+              parts: [{ text: JSON.stringify({ selected_memories: ["testing.md", "missing.md"] }) }],
             },
           }
         },
-        async delete(options: unknown, _requestOptions?: unknown) {
+        async delete(options: unknown) {
           calls.push({ method: "delete", options })
           return { data: true }
         },
@@ -106,33 +97,121 @@ describe("selectRelevantMemoryFilenames", () => {
     expect(calls.map((c) => c.method)).toEqual(["create", "prompt", "delete"])
 
     const createOptions = calls[0]!.options as {
-      parentID?: string
-      title?: string
-      directory?: string
+      body?: { parentID?: string; title?: string }
+      query?: { directory?: string }
     }
-    expect(createOptions.parentID).toBe("parent-session")
-    expect(createOptions.directory).toBe("/repo")
+    expect(createOptions.body?.parentID).toBe("parent-session")
+    expect(createOptions.body?.title).toBe("opencode-memory recall selector")
+    expect(createOptions.query?.directory).toBe("/repo")
 
     const promptOptions = calls[1]!.options as {
-      sessionID?: string
-      directory?: string
-      agent?: string
-      system?: string
-      format?: { type?: string }
-      parts?: Array<{ text?: string }>
+      path?: { id?: string }
+      query?: { directory?: string }
+      body?: {
+        agent?: string
+        system?: string
+        format?: { type?: string }
+        parts?: Array<{ text?: string }>
+      }
     }
-    expect(promptOptions.sessionID).toBe("selector-session")
-    expect(promptOptions.directory).toBe("/repo")
-    expect(promptOptions.agent).toBe("opencode-memory-recall")
-    expect(promptOptions.system).toBe(SELECT_MEMORIES_SYSTEM_PROMPT)
-    expect(promptOptions.format?.type).toBe("json_schema")
-    expect(promptOptions.parts?.[0]?.text).toContain("Query: How should we run database integration tests?")
-    expect(promptOptions.parts?.[0]?.text).toContain("Available memories:")
-    expect(promptOptions.parts?.[0]?.text).toContain("Recently used tools: grep")
+    expect(promptOptions.path?.id).toBe("selector-session")
+    expect(promptOptions.query?.directory).toBe("/repo")
+    expect(promptOptions.body?.agent).toBe("opencode-memory-recall")
+    expect(promptOptions.body?.system).toBe(SELECT_MEMORIES_SYSTEM_PROMPT)
+    expect(promptOptions.body?.format?.type).toBe("json_schema")
+    expect(promptOptions.body?.parts?.[0]?.text).toContain("Query: How should we run database integration tests?")
+    expect(promptOptions.body?.parts?.[0]?.text).toContain("Available memories:")
+    expect(promptOptions.body?.parts?.[0]?.text).toContain("Recently used tools: grep")
 
-    const deleteOptions = calls[2]!.options as { sessionID?: string; directory?: string }
-    expect(deleteOptions.sessionID).toBe("selector-session")
-    expect(deleteOptions.directory).toBe("/repo")
+    const deleteOptions = calls[2]!.options as {
+      path?: { id?: string }
+      query?: { directory?: string }
+    }
+    expect(deleteOptions.path?.id).toBe("selector-session")
+    expect(deleteOptions.query?.directory).toBe("/repo")
+  })
+
+  test("asks a temporary child session for structured filenames and deletes it", async () => {
+    const calls: Array<{ method: string; options: unknown }> = []
+    const selectorSessionIDs = new Set<string>()
+    const client = {
+      session: {
+        async create(options: unknown) {
+          calls.push({ method: "create", options })
+          return { data: { id: "selector-session" } }
+        },
+        async prompt(options: unknown) {
+          calls.push({ method: "prompt", options })
+          expect(selectorSessionIDs.has("selector-session")).toBe(true)
+          return {
+            data: {
+              info: {
+                structured: {
+                  selected_memories: ["testing.md", "missing.md"],
+                },
+              },
+              parts: [],
+            },
+          }
+        },
+        async delete(options: unknown) {
+          calls.push({ method: "delete", options })
+          return { data: true }
+        },
+      },
+    }
+
+    const selected = await selectRelevantMemoryFilenames({
+      client,
+      directory: "/repo",
+      parentSessionID: "parent-session",
+      query: "How should we run database integration tests?",
+      memories: [
+        header("testing.md", "Database integration test guidance"),
+        header("release.md", "Release process"),
+      ],
+      recentTools: ["grep"],
+      selectorSessionIDs,
+      agent: "opencode-memory-recall",
+    })
+
+    expect(selected).toEqual(["testing.md"])
+    expect(selectorSessionIDs.has("selector-session")).toBe(false)
+    expect(calls.map((c) => c.method)).toEqual(["create", "prompt", "delete"])
+
+    const createOptions = calls[0]!.options as {
+      body?: { parentID?: string; title?: string }
+      query?: { directory?: string }
+    }
+    expect(createOptions.body?.parentID).toBe("parent-session")
+    expect(createOptions.body?.title).toBe("opencode-memory recall selector")
+    expect(createOptions.query?.directory).toBe("/repo")
+
+    const promptOptions = calls[1]!.options as {
+      path?: { id?: string }
+      query?: { directory?: string }
+      body?: {
+        agent?: string
+        system?: string
+        format?: { type?: string }
+        parts?: Array<{ text?: string }>
+      }
+    }
+    expect(promptOptions.path?.id).toBe("selector-session")
+    expect(promptOptions.query?.directory).toBe("/repo")
+    expect(promptOptions.body?.agent).toBe("opencode-memory-recall")
+    expect(promptOptions.body?.system).toBe(SELECT_MEMORIES_SYSTEM_PROMPT)
+    expect(promptOptions.body?.format?.type).toBe("json_schema")
+    expect(promptOptions.body?.parts?.[0]?.text).toContain("Query: How should we run database integration tests?")
+    expect(promptOptions.body?.parts?.[0]?.text).toContain("Available memories:")
+    expect(promptOptions.body?.parts?.[0]?.text).toContain("Recently used tools: grep")
+
+    const deleteOptions = calls[2]!.options as {
+      path?: { id?: string }
+      query?: { directory?: string }
+    }
+    expect(deleteOptions.path?.id).toBe("selector-session")
+    expect(deleteOptions.query?.directory).toBe("/repo")
   })
 
   test("calls session methods with their client receiver intact", async () => {
@@ -140,10 +219,10 @@ describe("selectRelevantMemoryFilenames", () => {
     const session = {
       sessionID: "selector-session",
       deleted: false,
-      async create(_parameters?: unknown, _requestOptions?: unknown) {
+      async create(_parameters?: unknown) {
         return { data: { id: this.sessionID } }
       },
-      async prompt(_parameters: unknown, _requestOptions?: unknown) {
+      async prompt(_parameters: unknown) {
         return {
           data: {
             info: {
@@ -155,7 +234,7 @@ describe("selectRelevantMemoryFilenames", () => {
           },
         }
       },
-      async delete(_parameters: unknown, _requestOptions?: unknown) {
+      async delete(_parameters: unknown) {
         this.deleted = true
         return { data: true }
       },
@@ -181,15 +260,15 @@ describe("selectRelevantMemoryFilenames", () => {
     const selectorSessionIDs = new Set<string>()
     const client = {
       session: {
-        async create(_parameters?: unknown, _requestOptions?: unknown) {
+        async create(_parameters?: unknown) {
           calls.push("create")
           return { data: { id: "selector-session" } }
         },
-        async prompt(_parameters: unknown, _requestOptions?: unknown) {
+        async prompt(_parameters: unknown) {
           calls.push("prompt")
           throw new Error("selector failed")
         },
-        async delete(_parameters: unknown, _requestOptions?: unknown) {
+        async delete(_parameters: unknown) {
           calls.push("delete")
           return { data: true }
         },

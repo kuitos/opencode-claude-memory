@@ -67,11 +67,11 @@ function makeCompletedSelectorClient(selections: string[][]) {
   let sessionCount = 0
   return {
     session: {
-      async create(_parameters?: unknown, _requestOptions?: unknown) {
+      async create(_parameters?: unknown) {
         sessionCount += 1
         return { data: { id: `selector-session-${sessionCount}` } }
       },
-      async prompt(_parameters: unknown, _requestOptions?: unknown) {
+      async prompt(_parameters: unknown) {
         const selected = selections[promptCount] ?? selections.at(-1) ?? []
         promptCount += 1
         return {
@@ -85,7 +85,7 @@ function makeCompletedSelectorClient(selections: string[][]) {
           },
         }
       },
-      async delete(_parameters: unknown, _requestOptions?: unknown) {
+      async delete(_parameters: unknown) {
         return { data: true }
       },
     },
@@ -261,16 +261,22 @@ describe("MemoryPlugin system transform", () => {
 })
 
 describe("MemoryPlugin LLM recall prefetch", () => {
-  test("fails fast when recall prefetch receives an unsupported session client", async () => {
+  test("prefetches without failing user message transform when runtime client uses the default SDK shape", async () => {
     const repo = makeTempGitRepo()
     saveMemory(repo, "testing_pref_unsupported", "Testing Preference", "Database integration test guidance", "feedback", "Use real databases in integration tests.")
+    let createCalled = false
     const client = {
       session: {
         async create(_parameters?: unknown) {
+          createCalled = true
           return { data: { id: "selector-session" } }
         },
         async prompt(_parameters: unknown) {
-          return { data: { parts: [] } }
+          return {
+            data: {
+              parts: [{ text: JSON.stringify({ selected_memories: ["testing_pref_unsupported.md"] }) }],
+            },
+          }
         },
         async delete(_parameters: unknown) {
           return { data: true }
@@ -280,26 +286,28 @@ describe("MemoryPlugin LLM recall prefetch", () => {
 
     const plugin = await MemoryPlugin({ worktree: repo, directory: repo, client } as never)
     const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
+    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
 
-    let error: unknown
-    try {
-      await messagesTransform(
-        {},
-        {
-          messages: [
-            {
-              info: { role: "user", sessionID: "ses_unsupported_prefetch" },
-              parts: [{ type: "text", text: "How should we test database changes?" }],
-            },
-          ],
-        },
-      )
-    } catch (caught) {
-      error = caught
-    }
+    await messagesTransform(
+      {},
+      {
+        messages: [
+          {
+            info: { role: "user", sessionID: "ses_unsupported_prefetch" },
+            parts: [{ type: "text", text: "How should we test database changes?" }],
+          },
+        ],
+      },
+    )
+    await flushPromises()
 
-    expect(error).toBeInstanceOf(Error)
-    expect((error as Error).message).toContain("requires an OpenCode SDK with structured output session.prompt support")
+    const output = { system: [] as string[] }
+    await transform({ model: "test-model", sessionID: "ses_unsupported_prefetch" }, output)
+
+    expect(createCalled).toBe(true)
+    expect(output.system[0]).toContain("## MEMORY.md")
+    expect(output.system[0]).toContain("## Recalled Memories")
+    expect(output.system[0]).toContain("Testing Preference")
   })
 
   test("does not wait for an unfinished selector and injects completed recall on the next loop", async () => {
@@ -309,13 +317,13 @@ describe("MemoryPlugin LLM recall prefetch", () => {
     const promptResult = deferred<unknown>()
     const client = {
       session: {
-        async create(_parameters?: unknown, _requestOptions?: unknown) {
+        async create(_parameters?: unknown) {
           return { data: { id: "selector-session" } }
         },
-        async prompt(_parameters: unknown, _requestOptions?: unknown) {
+        async prompt(_parameters: unknown) {
           return promptResult.promise
         },
-        async delete(_parameters: unknown, _requestOptions?: unknown) {
+        async delete(_parameters: unknown) {
           return { data: true }
         },
       },

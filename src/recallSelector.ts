@@ -21,7 +21,7 @@ const SELECT_MEMORIES_FORMAT = {
 } as const
 
 export const UNSUPPORTED_RECALL_SELECTOR_CLIENT_MESSAGE =
-  "opencode-claude-memory LLM recall requires an OpenCode SDK with structured output session.prompt support. Please upgrade OpenCode/@opencode-ai/plugin."
+  "opencode-claude-memory LLM recall requires an OpenCode SDK session client with create/prompt/delete support."
 
 export type SessionClient = {
   session?: {
@@ -93,12 +93,9 @@ function extractSelectedMemories(response: unknown): string[] {
 export function isSupportedRecallSelectorClient(client: SessionClient | undefined): boolean {
   const session = client?.session
   return Boolean(
-    session?.create &&
-      session?.prompt &&
-      session?.delete &&
-      session.create.length >= 2 &&
-      session.prompt.length >= 2 &&
-      session.delete.length >= 2,
+    typeof session?.create === "function" &&
+      typeof session.prompt === "function" &&
+      typeof session.delete === "function",
   )
 }
 
@@ -116,9 +113,11 @@ async function createSelectorSession(
   if (!client.session?.create) return undefined
 
   const response = await client.session.create({
-    directory,
-    parentID: parentSessionID,
-    title: "opencode-memory recall selector",
+    body: {
+      parentID: parentSessionID,
+      title: "opencode-memory recall selector",
+    },
+    query: { directory },
   })
 
   return extractSessionID(response)
@@ -143,7 +142,11 @@ async function promptSelectorSession(
     parts: [{ type: "text", text: content }],
   }
 
-  return client.session.prompt({ sessionID, directory, ...body })
+  return client.session.prompt({
+    path: { id: sessionID },
+    query: { directory },
+    body,
+  })
 }
 
 async function deleteSelectorSession(
@@ -154,7 +157,10 @@ async function deleteSelectorSession(
   if (!client.session?.delete) return
 
   try {
-    await client.session.delete({ sessionID, directory })
+    await client.session.delete({
+      path: { id: sessionID },
+      query: { directory },
+    })
   } catch {
     // Best-effort cleanup. A failed selector deletion should not affect recall.
   }

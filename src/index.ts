@@ -3,7 +3,7 @@ import { tool } from "@opencode-ai/plugin"
 import { parse, resolve } from "path"
 import { buildMemorySystemPrompt } from "./prompt.js"
 import { formatRecalledMemories, recallSelectedMemories, type RecalledMemory } from "./recall.js"
-import { assertSupportedRecallSelectorClient, selectRelevantMemoryFilenames, type SessionClient } from "./recallSelector.js"
+import { isSupportedRecallSelectorClient, selectRelevantMemoryFilenames, type SessionClient } from "./recallSelector.js"
 import { scanMemoryFiles, type MemoryHeader } from "./memoryScan.js"
 import {
   saveMemory,
@@ -197,7 +197,7 @@ function startRecallPrefetch(input: {
 }): RecallPrefetch | undefined {
   if (!input.client || !isUsefulRecallQuery(input.query)) return undefined
 
-  assertSupportedRecallSelectorClient(input.client)
+  if (!isSupportedRecallSelectorClient(input.client)) return undefined
 
   const memoryDir = getMemoryDir(input.worktree)
   const headers = scanMemoryFiles(memoryDir).filter((header) => !input.alreadySurfaced.has(alreadySurfacedKey(header)))
