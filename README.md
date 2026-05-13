@@ -2,7 +2,9 @@
 
 # 🧠 Claude Code-compatible memory for OpenCode
 
-**Make OpenCode and Claude Code share the same memory — zero config, local-first, and no migration required.**
+**Persistent, local-first shared memory for OpenCode and Claude Code — zero config and no migration required.**
+
+This OpenCode memory plugin lets OpenCode read and write Claude Code-compatible Markdown memory files, so both CLIs share the same project context.
 
 Claude Code writes memory → OpenCode reads it. OpenCode writes memory → Claude Code reads it.
 
@@ -18,6 +20,8 @@ Claude Code writes memory → OpenCode reads it. OpenCode writes memory → Clau
 
 ## ✨ At a glance
 
+- **OpenCode plugin for Claude Code memory**
+  Adds persistent memory tools, system prompt injection, and post-session extraction to OpenCode.
 - **Claude Code-compatible memory**
   Uses Claude Code’s existing memory paths, file format, and taxonomy.
 - **Zero config**
