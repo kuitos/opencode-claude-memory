@@ -2,7 +2,7 @@
   "name": "opencode-claude-memory",
   "version": "0.0.0-semantically-released",
   "type": "module",
-  "description": "Claude Code-compatible memory compatibility layer for OpenCode — zero config, local-first, no migration",
+  "description": "OpenCode plugin for Claude Code memory: persistent, local-first shared memory with Claude Code-compatible Markdown files, auto extraction, and auto-dream",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -26,13 +26,29 @@
     "type": "git",
     "url": "git+https://github.com/kuitos/opencode-claude-memory.git"
   },
+  "bugs": {
+    "url": "https://github.com/kuitos/opencode-claude-memory/issues"
+  },
   "homepage": "https://github.com/kuitos/opencode-claude-memory#readme",
   "keywords": [
     "opencode",
+    "opencode-plugin",
+    "opencode-ai",
+    "claude",
+    "claude-code",
+    "claude-code-memory",
+    "claude-memory",
     "plugin",
     "memory",
-    "persistent",
-    "cross-session",
+    "persistent-memory",
+    "agent-memory",
+    "ai-memory",
+    "cross-session-memory",
+    "shared-memory",
+    "local-first",
+    "markdown-memory",
+    "coding-agent",
+    "developer-tools",
     "claude-code-compatible"
   ],
   "license": "MIT",
