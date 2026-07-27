@@ -316,7 +316,6 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
       output.temperature = 0
       output.options = {
         ...output.options,
-        maxOutputTokens: 256,
       }
     },
 

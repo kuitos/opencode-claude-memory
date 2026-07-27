@@ -133,7 +133,7 @@ describe("memory recall prefetch end-to-end", () => {
       const recallParams: { temperature?: number; options?: Record<string, unknown> } = {}
       await chatParamsHook({ agent: "opencode-memory-recall" }, recallParams)
       expect(recallParams.temperature).toBe(0)
-      expect(recallParams.options?.maxOutputTokens).toBe(256)
+      expect(recallParams.options?.maxOutputTokens).toBeUndefined()
 
       await tools.memory_save.execute(
         {
