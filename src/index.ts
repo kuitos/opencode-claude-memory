@@ -292,7 +292,65 @@ function getCallID(ctx: unknown): string | undefined {
   return typeof v === "string" ? v : undefined
 }
 
-export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
+// ─── Native post-session extraction (optional) ───────────────────────────────
+// Ported from bin/opencode-memory. Gated by OPENCODE_MEMORY_NATIVE_EXTRACT=1 so
+// existing users keep current behavior; opt in for cross-platform extraction
+// (no bash wrapper needed) that also covers SDK/spawned sessions (e.g. bots,
+// `opencode run`, IDE integrations) which the shell wrapper cannot intercept.
+// Extraction is additive only — it never deletes or modifies existing memories.
+const EXTRACT_PROMPT = `You are now acting as the memory extraction subagent. Review the entire conversation above and extract any information worth remembering for future sessions.
+
+## What to save
+
+Use the \`memory_save\` tool to persist memories. There are four types:
+
+1. **user** — Who the user is: role, expertise, preferences, communication style. Helps tailor future interactions.
+2. **feedback** — Guidance on how to work: corrections ("don't do X"), confirmations ("yes, keep doing that"), approach preferences. Include *why* so edge cases can be judged.
+3. **project** — Ongoing work context: goals, deadlines, initiatives, decisions, bugs. NOT derivable from code/git. Convert relative dates to absolute.
+4. **reference** — Pointers to external resources: URLs, tool names, where to find information outside the codebase.
+
+## What NOT to save
+
+- Code patterns, architecture, file structure — derivable from the codebase
+- Git history, recent changes — use \`git log\`/\`git blame\`
+- Debugging solutions — the fix is in the code
+- Anything already in AGENTS.md / project config files
+- Ephemeral task details or current conversation context
+- Information that was already saved in a previous extraction
+
+## How to save
+
+For each memory worth saving, call \`memory_save\` with:
+- \`file_name\`: descriptive slug (e.g., \`user_role\`, \`feedback_testing_approach\`)
+- \`name\`: short title
+- \`description\`: one-line description (used for relevance matching in future sessions)
+- \`type\`: one of user, feedback, project, reference
+- \`content\`: the memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines.
+
+## Instructions
+
+1. Analyze the conversation for memorable information
+2. Check existing memories first (use \`memory_list\`) to avoid duplicates — update existing ones if needed
+3. Save each distinct memory as a separate entry
+4. If the conversation was trivial (e.g., just "hello" or a quick lookup), save nothing — that's fine
+5. Be selective: 0-3 memories per session is typical. Quality over quantity.
+6. Do NOT save a memory about the extraction process itself.`
+
+// Minimal shape of Bun's `$` shell API — kept loose to avoid coupling to Bun types.
+type ShellLike = (opts?: { env?: Record<string, string | undefined> }) => (
+  strings: TemplateStringsArray,
+  ...expressions: unknown[]
+) => { quiet(): Promise<unknown> }
+
+async function runNativeExtraction(sessionID: string, directory: string, shell: unknown): Promise<void> {
+  if (!shell) return
+  const $ = shell as ShellLike
+  // OPENCODE_MEMORY_FORK=1 marks the forked process so its plugin instance skips
+  // its own session.idle — prevents infinite extraction loops.
+  await $({ env: { ...process.env, OPENCODE_MEMORY_FORK: "1" } })`opencode run -s ${sessionID} --fork --dir ${directory} ${EXTRACT_PROMPT}`.quiet()
+}
+
+export const MemoryPlugin: Plugin = async ({ worktree, directory, client, $ }) => {
   directory ??= worktree
   const memoryRoot = resolveMemoryRoot(worktree, directory)
   getMemoryDir(memoryRoot)
@@ -309,6 +367,26 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
         hidden: true,
         prompt: "Select up to 5 relevant memory filenames for the current user query. Return only the requested structured output.",
       }
+    },
+
+    // Native post-session extraction. Opt-in via OPENCODE_MEMORY_NATIVE_EXTRACT=1.
+    // The event hook receives every bus event; we act only on session.idle and
+    // only when native extraction is enabled and we are not ourselves a fork.
+    event: async (input: unknown) => {
+      if (process.env.OPENCODE_MEMORY_NATIVE_EXTRACT !== "1") return
+      if (process.env.OPENCODE_MEMORY_FORK === "1") return // recursion guard
+      const evt = (
+        input && typeof input === "object" && "event" in input
+          ? (input as { event: unknown }).event
+          : input
+      ) as { type?: string; properties?: { sessionID?: string; sessionId?: string; id?: string } } | undefined
+      if (evt?.type !== "session.idle") return
+      const sessionID = evt.properties?.sessionID ?? evt.properties?.sessionId ?? evt.properties?.id
+      if (!sessionID) return
+      // Fire and forget — must not block session teardown.
+      void runNativeExtraction(sessionID, directory, $).catch((e) => {
+        console.error("[opencode-claude-memory] native extraction failed:", (e as Error)?.message ?? e)
+      })
     },
 
     "chat.params": async (input, output) => {
