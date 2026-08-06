@@ -36,6 +36,7 @@ type RecallPrefetch = {
 
 const turnContextBySession = new Map<string, TurnContext>()
 const selectorSessionIDs = new Set<string>()
+const nativeExtractLastBySession = new Map<string, number>()
 
 function shouldIgnoreMemoryContext(query: string | undefined): boolean {
   if (process.env.OPENCODE_MEMORY_IGNORE === "1") return true
@@ -370,8 +371,11 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client, $ }) =
     },
 
     // Native post-session extraction. Opt-in via OPENCODE_MEMORY_NATIVE_EXTRACT=1.
-    // The event hook receives every bus event; we act only on session.idle and
-    // only when native extraction is enabled and we are not ourselves a fork.
+    // Hooks `session.status` with status.type === "idle" — the non-deprecated
+    // idle signal. (`session.idle` was deprecated 2025-11-17 and is being removed
+    // in opencode's V1 API migration; we still accept it for older builds.)
+    // Per-session cooldown (default 5 min) so long-lived server/SDK sessions
+    // don't fork after every turn.
     event: async (input: unknown) => {
       if (process.env.OPENCODE_MEMORY_NATIVE_EXTRACT !== "1") return
       if (process.env.OPENCODE_MEMORY_FORK === "1") return // recursion guard
@@ -379,10 +383,21 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client, $ }) =
         input && typeof input === "object" && "event" in input
           ? (input as { event: unknown }).event
           : input
-      ) as { type?: string; properties?: { sessionID?: string; sessionId?: string; id?: string } } | undefined
-      if (evt?.type !== "session.idle") return
-      const sessionID = evt.properties?.sessionID ?? evt.properties?.sessionId ?? evt.properties?.id
+      ) as {
+        type?: string
+        properties?: { sessionID?: string; sessionId?: string; id?: string; status?: { type?: string } }
+      } | undefined
+      const isIdle =
+        evt?.type === "session.idle" ||
+        (evt?.type === "session.status" && evt?.properties?.status?.type === "idle")
+      if (!isIdle) return
+      const sessionID = evt?.properties?.sessionID ?? evt?.properties?.sessionId ?? evt?.properties?.id
       if (!sessionID) return
+      const now = Date.now()
+      const cooldownMs = Number(process.env.OPENCODE_MEMORY_EXTRACT_COOLDOWN_MS) || 5 * 60 * 1000
+      const last = nativeExtractLastBySession.get(sessionID) ?? 0
+      if (now - last < cooldownMs) return
+      nativeExtractLastBySession.set(sessionID, now)
       // Fire and forget — must not block session teardown.
       void runNativeExtraction(sessionID, directory, $).catch((e) => {
         console.error("[opencode-claude-memory] native extraction failed:", (e as Error)?.message ?? e)
