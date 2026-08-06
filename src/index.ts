@@ -36,7 +36,6 @@ type RecallPrefetch = {
 
 const turnContextBySession = new Map<string, TurnContext>()
 const selectorSessionIDs = new Set<string>()
-const nativeExtractLastBySession = new Map<string, number>()
 
 function shouldIgnoreMemoryContext(query: string | undefined): boolean {
   if (process.env.OPENCODE_MEMORY_IGNORE === "1") return true
@@ -294,12 +293,15 @@ function getCallID(ctx: unknown): string | undefined {
 }
 
 // ─── Native post-session extraction (optional) ───────────────────────────────
-// Ported from bin/opencode-memory. Gated by OPENCODE_MEMORY_NATIVE_EXTRACT=1 so
-// existing users keep current behavior; opt in for cross-platform extraction
-// (no bash wrapper needed) that also covers SDK/spawned sessions (e.g. bots,
-// `opencode run`, IDE integrations) which the shell wrapper cannot intercept.
-// Extraction is additive only — it never deletes or modifies existing memories.
-const EXTRACT_PROMPT = `You are now acting as the memory extraction subagent. Review the entire conversation above and extract any information worth remembering for future sessions.
+// Architecture follows opencode-mem's proven pattern: hook `session.idle`,
+// fetch the conversation via ctx.client.session.messages(), then run extraction
+// in an isolated sub-session (create + prompt + delete via ctx.client). No shell,
+// no `opencode run --fork` subprocess — those don't work cross-platform from a
+// plugin and `ctx.$` is not reliably populated.
+// Gated by OPENCODE_MEMORY_NATIVE_EXTRACT=1 (existing behavior unchanged).
+// 10s debounce collapses rapid idle events. Recursion guard via an in-process
+// Set of sub-session IDs. Extraction is additive only (memory_save).
+const EXTRACT_PROMPT = `You are now acting as the memory extraction subagent. The conversation below is reviewed for anything worth remembering for future sessions.
 
 ## What to save
 
@@ -337,21 +339,90 @@ For each memory worth saving, call \`memory_save\` with:
 5. Be selective: 0-3 memories per session is typical. Quality over quantity.
 6. Do NOT save a memory about the extraction process itself.`
 
-// Minimal shape of Bun's `$` shell API — kept loose to avoid coupling to Bun types.
-type ShellLike = (opts?: { env?: Record<string, string | undefined> }) => (
-  strings: TemplateStringsArray,
-  ...expressions: unknown[]
-) => { quiet(): Promise<unknown> }
+const NATIVE_EXTRACT_DEBOUNCE_MS = 10000
+const NATIVE_EXTRACT_MAX_CONV_CHARS = 60000
+const nativeIdleTimer = new Map<string, ReturnType<typeof setTimeout>>()
+const nativeExtractionSessions = new Set<string>() // sub-session IDs we create → skip their idle events
 
-async function runNativeExtraction(sessionID: string, directory: string, shell: unknown): Promise<void> {
-  if (!shell) return
-  const $ = shell as ShellLike
-  // OPENCODE_MEMORY_FORK=1 marks the forked process so its plugin instance skips
-  // its own session.idle — prevents infinite extraction loops.
-  await $({ env: { ...process.env, OPENCODE_MEMORY_FORK: "1" } })`opencode run -s ${sessionID} --fork --dir ${directory} ${EXTRACT_PROMPT}`.quiet()
+function extractIDFromResponse(response: unknown): string | null {
+  const data = (response as { data?: unknown } | undefined)?.data ?? response
+  const obj = data as { id?: unknown; sessionID?: unknown } | undefined
+  const v = obj?.id ?? obj?.sessionID
+  return typeof v === "string" ? v : null
 }
 
-export const MemoryPlugin: Plugin = async ({ worktree, directory, client, $ }) => {
+function buildConversationForExtraction(
+  messages: Array<{ info?: { role?: unknown }; parts?: unknown[] }>,
+): string {
+  const lines: string[] = []
+  for (const m of messages) {
+    const role = m?.info?.role
+    if (!role || !Array.isArray(m?.parts)) continue
+    for (const p of m.parts) {
+      const part = p as {
+        type?: string
+        text?: string
+        synthetic?: boolean
+        tool?: string
+        state?: { status?: string; output?: string }
+      }
+      if (part.type === "text" && typeof part.text === "string" && !part.synthetic) {
+        lines.push(`### ${role === "user" ? "User" : "Assistant"}\n${part.text}`)
+      } else if (part.type === "tool" && part.tool) {
+        if (part.state?.status === "completed" && typeof part.state?.output === "string") {
+          const out = part.state.output.length > 300 ? part.state.output.slice(0, 300) + "…" : part.state.output
+          lines.push(`_[tool ${part.tool}: ${out}]_`)
+        }
+      }
+    }
+  }
+  let text = lines.join("\n\n")
+  if (text.length > NATIVE_EXTRACT_MAX_CONV_CHARS) text = text.slice(0, NATIVE_EXTRACT_MAX_CONV_CHARS) + "\n\n…[truncated]"
+  return text
+}
+
+// Loose client shape for the extraction sub-session flow (messages → create → prompt → delete).
+type ExtractionClient = {
+  session?: {
+    messages?: (args: { path: { id: string } }) => Promise<{ data?: unknown }>
+    create?: (args: { body: { parentID: string; title: string }; query: { directory: string } }) => Promise<unknown>
+    prompt?: (args: { path: { id: string }; query: { directory: string }; body: { agent: string; parts: unknown[] } }) => Promise<unknown>
+    delete?: (args: { path: { id: string }; query: { directory: string } }) => Promise<unknown>
+  }
+}
+
+async function runNativeExtraction(client: unknown, sessionID: string, directory: string): Promise<void> {
+  const c = client as ExtractionClient
+  if (!c?.session?.messages || !c.session.create || !c.session.prompt) return
+
+  const resp = await c.session.messages({ path: { id: sessionID } })
+  const messages = ((resp as { data?: unknown }).data ?? []) as Array<{ info?: { role?: unknown }; parts?: unknown[] }>
+  const convText = buildConversationForExtraction(messages)
+  if (convText.trim().length < 20) return
+
+  const created = await c.session.create({
+    body: { parentID: sessionID, title: "opencode-memory extraction" },
+    query: { directory },
+  })
+  const forkID = extractIDFromResponse(created)
+  if (!forkID) return
+  nativeExtractionSessions.add(forkID)
+  try {
+    await c.session.prompt({
+      path: { id: forkID },
+      query: { directory },
+      body: {
+        agent: "build",
+        parts: [{ type: "text", text: `${EXTRACT_PROMPT}\n\n---\n\n## Conversation to review\n\n${convText}` }],
+      },
+    })
+  } finally {
+    nativeExtractionSessions.delete(forkID)
+    await c.session?.delete?.({ path: { id: forkID }, query: { directory } }).catch(() => {})
+  }
+}
+
+export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
   directory ??= worktree
   const memoryRoot = resolveMemoryRoot(worktree, directory)
   getMemoryDir(memoryRoot)
@@ -371,37 +442,31 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client, $ }) =
     },
 
     // Native post-session extraction. Opt-in via OPENCODE_MEMORY_NATIVE_EXTRACT=1.
-    // Hooks `session.status` with status.type === "idle" — the non-deprecated
-    // idle signal. (`session.idle` was deprecated 2025-11-17 and is being removed
-    // in opencode's V1 API migration; we still accept it for older builds.)
-    // Per-session cooldown (default 5 min) so long-lived server/SDK sessions
-    // don't fork after every turn.
+    // Hooks `session.idle` (the established idle signal — used by opencode-mem and
+    // others). 10s debounce collapses rapid idle into one capture; an in-process
+    // Set of sub-session IDs prevents recursion (the extraction sub-session also
+    // goes idle when done). All work goes through ctx.client — no shell, no fork.
     event: async (input: unknown) => {
       if (process.env.OPENCODE_MEMORY_NATIVE_EXTRACT !== "1") return
-      if (process.env.OPENCODE_MEMORY_FORK === "1") return // recursion guard
       const evt = (
         input && typeof input === "object" && "event" in input
           ? (input as { event: unknown }).event
           : input
-      ) as {
-        type?: string
-        properties?: { sessionID?: string; sessionId?: string; id?: string; status?: { type?: string } }
-      } | undefined
-      const isIdle =
-        evt?.type === "session.idle" ||
-        (evt?.type === "session.status" && evt?.properties?.status?.type === "idle")
-      if (!isIdle) return
-      const sessionID = evt?.properties?.sessionID ?? evt?.properties?.sessionId ?? evt?.properties?.id
+      ) as { type?: string; properties?: { sessionID?: string } } | undefined
+      if (evt?.type !== "session.idle") return
+      const sessionID = evt.properties?.sessionID
       if (!sessionID) return
-      const now = Date.now()
-      const cooldownMs = Number(process.env.OPENCODE_MEMORY_EXTRACT_COOLDOWN_MS) || 5 * 60 * 1000
-      const last = nativeExtractLastBySession.get(sessionID) ?? 0
-      if (now - last < cooldownMs) return
-      nativeExtractLastBySession.set(sessionID, now)
-      // Fire and forget — must not block session teardown.
-      void runNativeExtraction(sessionID, directory, $).catch((e) => {
-        console.error("[opencode-claude-memory] native extraction failed:", (e as Error)?.message ?? e)
-      })
+      if (nativeExtractionSessions.has(sessionID)) return // skip our own sub-sessions
+      if (nativeIdleTimer.has(sessionID)) clearTimeout(nativeIdleTimer.get(sessionID)!)
+      nativeIdleTimer.set(
+        sessionID,
+        setTimeout(() => {
+          nativeIdleTimer.delete(sessionID)
+          void runNativeExtraction(client, sessionID, directory).catch((e) => {
+            console.error("[opencode-claude-memory] native extraction failed:", (e as Error)?.message ?? e)
+          })
+        }, NATIVE_EXTRACT_DEBOUNCE_MS),
+      )
     },
 
     "chat.params": async (input, output) => {
