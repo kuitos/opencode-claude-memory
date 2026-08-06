@@ -298,7 +298,8 @@ function getCallID(ctx: unknown): string | undefined {
 // in an isolated sub-session (create + prompt + delete via ctx.client). No shell,
 // no `opencode run --fork` subprocess — those don't work cross-platform from a
 // plugin and `ctx.$` is not reliably populated.
-// Gated by OPENCODE_MEMORY_NATIVE_EXTRACT=1 (existing behavior unchanged).
+// Enabled by default on Windows (bash wrapper can't run there); opt-in elsewhere
+// via OPENCODE_MEMORY_NATIVE_EXTRACT=1; =0 force-disables.
 // 10s debounce collapses rapid idle events. Recursion guard via an in-process
 // Set of sub-session IDs. Extraction is additive only (memory_save).
 const EXTRACT_PROMPT = `You are now acting as the memory extraction subagent. The conversation below is reviewed for anything worth remembering for future sessions.
@@ -422,6 +423,17 @@ async function runNativeExtraction(client: unknown, sessionID: string, directory
   }
 }
 
+// Native extraction is opt-in everywhere EXCEPT Windows, where the bash wrapper
+// (bin/opencode-memory) cannot run — there's no .zshrc/.bashrc shell hook and no
+// bash/jq/python3 on native pwsh/cmd. Without this default, Windows users get
+// zero extraction silently. OPENCODE_MEMORY_NATIVE_EXTRACT=0 force-disables.
+function nativeExtractionEnabled(): boolean {
+  const flag = process.env.OPENCODE_MEMORY_NATIVE_EXTRACT
+  if (flag === "0") return false
+  if (flag === "1") return true
+  return process.platform === "win32"
+}
+
 export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
   directory ??= worktree
   const memoryRoot = resolveMemoryRoot(worktree, directory)
@@ -441,13 +453,14 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
       }
     },
 
-    // Native post-session extraction. Opt-in via OPENCODE_MEMORY_NATIVE_EXTRACT=1.
-    // Hooks `session.idle` (the established idle signal — used by opencode-mem and
-    // others). 10s debounce collapses rapid idle into one capture; an in-process
-    // Set of sub-session IDs prevents recursion (the extraction sub-session also
-    // goes idle when done). All work goes through ctx.client — no shell, no fork.
+    // Native post-session extraction. Enabled by default on Windows (where the
+    // bash wrapper can't run) and via OPENCODE_MEMORY_NATIVE_EXTRACT=1 elsewhere;
+    // =0 force-disables. Hooks `session.idle` (the established idle signal — used
+    // by opencode-mem and others). 10s debounce collapses rapid idle into one
+    // capture; an in-process Set of sub-session IDs prevents recursion. All work
+    // goes through ctx.client — no shell, no fork.
     event: async (input: unknown) => {
-      if (process.env.OPENCODE_MEMORY_NATIVE_EXTRACT !== "1") return
+      if (!nativeExtractionEnabled()) return
       const evt = (
         input && typeof input === "object" && "event" in input
           ? (input as { event: unknown }).event
