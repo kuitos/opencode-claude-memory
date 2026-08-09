@@ -341,15 +341,22 @@ For each memory worth saving, call \`memory_save\` with:
 6. Do NOT save a memory about the extraction process itself.`
 
 const NATIVE_EXTRACT_DEBOUNCE_MS = 10000
+const NATIVE_EXTRACT_TIMEOUT_MS = 120000 // hard cap on a single extraction fork (prevents permanent leak on hang)
 const NATIVE_EXTRACT_MAX_CONV_CHARS = 60000
+const NATIVE_EXTRACT_GRACE_MS = 60000 // keep forkID in the guard after delete — covers the idle-race window
 const nativeIdleTimer = new Map<string, ReturnType<typeof setTimeout>>()
-const nativeExtractionSessions = new Set<string>() // sub-session IDs we create → skip their idle events
+const nativeExtractionSessions = new Set<string>() // sub-session IDs → skip their idle AND shield from transforms
+const nativeExtractionInFlight = new Set<string>() // parent sessionIDs with an extraction running → no overlap
 
 function extractIDFromResponse(response: unknown): string | null {
   const data = (response as { data?: unknown } | undefined)?.data ?? response
   const obj = data as { id?: unknown; sessionID?: unknown } | undefined
   const v = obj?.id ?? obj?.sessionID
   return typeof v === "string" ? v : null
+}
+
+function getNativeExtractAgent(): string {
+  return process.env.OPENCODE_MEMORY_AGENT || "opencode-memory-extract"
 }
 
 function buildConversationForExtraction(
@@ -378,56 +385,93 @@ function buildConversationForExtraction(
     }
   }
   let text = lines.join("\n\n")
-  if (text.length > NATIVE_EXTRACT_MAX_CONV_CHARS) text = text.slice(0, NATIVE_EXTRACT_MAX_CONV_CHARS) + "\n\n…[truncated]"
+  // Keep the TAIL (newest turns carry the new facts worth extracting), drop the oldest head.
+  if (text.length > NATIVE_EXTRACT_MAX_CONV_CHARS) {
+    text = "…[older turns truncated]\n\n" + text.slice(-NATIVE_EXTRACT_MAX_CONV_CHARS)
+  }
   return text
 }
 
-// Loose client shape for the extraction sub-session flow (messages → create → prompt → delete).
+// Client shape for the extraction sub-session flow (messages → create → prompt → delete).
 type ExtractionClient = {
   session?: {
-    messages?: (args: { path: { id: string } }) => Promise<{ data?: unknown }>
+    messages?: (args: { path: { id: string }; query: { directory: string } }) => Promise<{ data?: unknown }>
     create?: (args: { body: { parentID: string; title: string }; query: { directory: string } }) => Promise<unknown>
-    prompt?: (args: { path: { id: string }; query: { directory: string }; body: { agent: string; parts: unknown[] } }) => Promise<unknown>
+    prompt?: (args: {
+      path: { id: string }
+      query: { directory: string }
+      body: { agent: string; tools?: Record<string, boolean>; model?: string; parts: unknown[] }
+    }) => Promise<unknown>
     delete?: (args: { path: { id: string }; query: { directory: string } }) => Promise<unknown>
   }
 }
 
+// Security: the extraction fork runs on raw, potentially-untrusted transcript content (fetched web
+// pages, tool output). It MUST be sandboxed to the memory tools only (no bash/edit/write) and capped
+// by a timeout so a hang can't leak the sub-session forever.
 async function runNativeExtraction(client: unknown, sessionID: string, directory: string): Promise<void> {
   const c = client as ExtractionClient
   if (!c?.session?.messages || !c.session.create || !c.session.prompt) return
+  if (nativeExtractionInFlight.has(sessionID)) return // no overlapping runs against the same session
 
-  const resp = await c.session.messages({ path: { id: sessionID } })
-  const messages = ((resp as { data?: unknown }).data ?? []) as Array<{ info?: { role?: unknown }; parts?: unknown[] }>
-  const convText = buildConversationForExtraction(messages)
-  if (convText.trim().length < 20) return
-
-  const created = await c.session.create({
-    body: { parentID: sessionID, title: "opencode-memory extraction" },
-    query: { directory },
-  })
-  const forkID = extractIDFromResponse(created)
-  if (!forkID) return
-  nativeExtractionSessions.add(forkID)
+  nativeExtractionInFlight.add(sessionID)
+  let forkID: string | null = null
   try {
-    await c.session.prompt({
-      path: { id: forkID },
+    // query.directory is required for correct resolution under multi-directory serve.
+    const resp = await c.session.messages({ path: { id: sessionID }, query: { directory } })
+    const messages = ((resp as { data?: unknown }).data ?? []) as Array<{ info?: { role?: unknown }; parts?: unknown[] }>
+    const convText = buildConversationForExtraction(messages)
+    if (convText.trim().length < 20) return
+
+    const created = await c.session.create({
+      body: { parentID: sessionID, title: "opencode-memory extraction" },
       query: { directory },
-      body: {
-        agent: "build",
-        parts: [{ type: "text", text: `${EXTRACT_PROMPT}\n\n---\n\n## Conversation to review\n\n${convText}` }],
-      },
     })
+    forkID = extractIDFromResponse(created)
+    if (!forkID) return
+    nativeExtractionSessions.add(forkID) // shield the fork from the plugin's own recall/transform hooks
+
+    const body: { agent: string; tools: Record<string, boolean>; model?: string; parts: unknown[] } = {
+      agent: getNativeExtractAgent(), // honour OPENCODE_MEMORY_AGENT (default the dedicated hidden agent)
+      tools: { memory_save: true, memory_list: true }, // restrict to memory tools only — NO bash/edit/write
+      parts: [{ type: "text", text: convText }], // the extraction instruction lives in the agent's system prompt
+    }
+    const modelEnv = process.env.OPENCODE_MEMORY_MODEL
+    if (modelEnv) body.model = modelEnv
+
+    // Race the prompt against a hard timeout so a hung/permission-gated fork can't leak.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("native extraction timed out")), NATIVE_EXTRACT_TIMEOUT_MS)
+    })
+    try {
+      await Promise.race([
+        c.session.prompt({ path: { id: forkID }, query: { directory }, body }),
+        timeout,
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  } catch (e) {
+    console.error("[opencode-claude-memory] native extraction failed:", (e as Error)?.message ?? e)
   } finally {
-    nativeExtractionSessions.delete(forkID)
-    await c.session?.delete?.({ path: { id: forkID }, query: { directory } }).catch(() => {})
+    if (forkID) {
+      await c.session?.delete?.({ path: { id: forkID }, query: { directory } }).catch(() => {})
+      // Hold the guard past delete: the fork's session.idle can arrive on a separate channel after
+      // the delete HTTP call resolves, and would otherwise re-trigger extraction of the fork itself.
+      const id = forkID
+      setTimeout(() => nativeExtractionSessions.delete(id), NATIVE_EXTRACT_GRACE_MS)
+    }
+    nativeExtractionInFlight.delete(sessionID)
   }
 }
 
-// Native extraction is opt-in everywhere EXCEPT Windows, where the bash wrapper
-// (bin/opencode-memory) cannot run — there's no .zshrc/.bashrc shell hook and no
-// bash/jq/python3 on native pwsh/cmd. Without this default, Windows users get
-// zero extraction silently. OPENCODE_MEMORY_NATIVE_EXTRACT=0 force-disables.
+// Native extraction is the bash-wrapper replacement. Default-on for Windows (where the wrapper can't
+// run); opt-in elsewhere. Honors the wrapper's documented OPENCODE_MEMORY_EXTRACT=0 opt-out so a user
+// who disabled extraction gets it disabled here too (not silently re-enabled by the win32 default).
+// OPENCODE_MEMORY_NATIVE_EXTRACT=0/1 force-disables/enables regardless of platform.
 function nativeExtractionEnabled(): boolean {
+  if (process.env.OPENCODE_MEMORY_EXTRACT === "0") return false
   const flag = process.env.OPENCODE_MEMORY_NATIVE_EXTRACT
   if (flag === "0") return false
   if (flag === "1") return true
@@ -451,6 +495,13 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
         hidden: true,
         prompt: "Select up to 5 relevant memory filenames for the current user query. Return only the requested structured output.",
       }
+      // Dedicated hidden agent for native extraction: its system prompt IS the extraction instruction,
+      // so the fork runs with an explicit system (not the build agent's) and tool-restricted to memory_*.
+      mutable.agent[getNativeExtractAgent()] ??= {
+        mode: "all",
+        hidden: true,
+        prompt: EXTRACT_PROMPT,
+      }
     },
 
     // Native post-session extraction. Enabled by default on Windows (where the
@@ -469,7 +520,8 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
       if (evt?.type !== "session.idle") return
       const sessionID = evt.properties?.sessionID
       if (!sessionID) return
-      if (nativeExtractionSessions.has(sessionID)) return // skip our own sub-sessions
+      if (nativeExtractionSessions.has(sessionID)) return // skip our own extraction sub-sessions
+      if (selectorSessionIDs.has(sessionID)) return // skip recall-selector child sessions (same guard the transforms use)
       if (nativeIdleTimer.has(sessionID)) clearTimeout(nativeIdleTimer.get(sessionID)!)
       nativeIdleTimer.set(
         sessionID,
@@ -498,7 +550,7 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
 
     "experimental.chat.messages.transform": async (_input, output) => {
       const { query, sessionID, messageID, messageIndex } = getLastUserQuery(output.messages)
-      if (sessionID && selectorSessionIDs.has(sessionID)) return
+      if (sessionID && (selectorSessionIDs.has(sessionID) || nativeExtractionSessions.has(sessionID))) return
 
       if (sessionID) {
         const alreadySurfaced = new Set<string>()
@@ -562,7 +614,7 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
           ? (_input as { sessionID?: string }).sessionID
           : undefined
       }
-      if (sessionID && selectorSessionIDs.has(sessionID)) return
+      if (sessionID && (selectorSessionIDs.has(sessionID) || nativeExtractionSessions.has(sessionID))) return
 
       const ctx = sessionID ? turnContextBySession.get(sessionID) : undefined
       const query = ctx?.query
