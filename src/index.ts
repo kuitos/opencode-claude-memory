@@ -359,6 +359,15 @@ function getNativeExtractAgent(): string {
   return process.env.OPENCODE_MEMORY_AGENT || "opencode-memory-extract"
 }
 
+// Parse OPENCODE_MEMORY_MODEL into the SDK's ModelRef shape (providerID/modelID), same as getRecallModel().
+function getNativeExtractModel(): { providerID: string; modelID: string } | undefined {
+  const raw = process.env.OPENCODE_MEMORY_MODEL
+  if (!raw) return undefined
+  const slashIdx = raw.indexOf("/")
+  if (slashIdx <= 0 || slashIdx === raw.length - 1) return undefined
+  return { providerID: raw.slice(0, slashIdx), modelID: raw.slice(slashIdx + 1) }
+}
+
 function buildConversationForExtraction(
   messages: Array<{ info?: { role?: unknown }; parts?: unknown[] }>,
 ): string {
@@ -400,7 +409,7 @@ type ExtractionClient = {
     prompt?: (args: {
       path: { id: string }
       query: { directory: string }
-      body: { agent: string; tools?: Record<string, boolean>; model?: string; parts: unknown[] }
+      body: { agent: string; system?: string; tools?: Record<string, boolean>; model?: { providerID: string; modelID: string }; parts: unknown[] }
     }) => Promise<unknown>
     delete?: (args: { path: { id: string }; query: { directory: string } }) => Promise<unknown>
   }
@@ -431,13 +440,20 @@ async function runNativeExtraction(client: unknown, sessionID: string, directory
     if (!forkID) return
     nativeExtractionSessions.add(forkID) // shield the fork from the plugin's own recall/transform hooks
 
-    const body: { agent: string; tools: Record<string, boolean>; model?: string; parts: unknown[] } = {
-      agent: getNativeExtractAgent(), // honour OPENCODE_MEMORY_AGENT (default the dedicated hidden agent)
-      tools: { memory_save: true, memory_list: true }, // restrict to memory tools only — NO bash/edit/write
-      parts: [{ type: "text", text: convText }], // the extraction instruction lives in the agent's system prompt
+    const body: {
+      agent: string
+      system: string
+      tools: Record<string, boolean>
+      model?: { providerID: string; modelID: string }
+      parts: unknown[]
+    } = {
+      agent: getNativeExtractAgent(),
+      system: EXTRACT_PROMPT, // always pass explicitly — ??= agent registration can miss if the agent already exists
+      tools: { "*": false, memory_save: true, memory_list: true }, // wildcard deny first; findLast → memory allows win
+      parts: [{ type: "text", text: convText }],
     }
-    const modelEnv = process.env.OPENCODE_MEMORY_MODEL
-    if (modelEnv) body.model = modelEnv
+    const extractModel = getNativeExtractModel()
+    if (extractModel) body.model = extractModel
 
     // Race the prompt against a hard timeout so a hung/permission-gated fork can't leak.
     let timer: ReturnType<typeof setTimeout> | undefined
