@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { MemoryPlugin } from "../src/index.js"
+import { readIndex, readMemory } from "../src/memory.js"
 
 const tempDirs: string[] = []
 
@@ -67,6 +68,32 @@ async function runToolWithAfter<TArgs extends object>(
 }
 
 describe("memory tool titles end-to-end", () => {
+  test("rejects an omitted memory name before persistence", async () => {
+    const repo = makeTempGitRepo()
+    const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
+    process.env.CLAUDE_CONFIG_DIR = join(repo, ".claude-test")
+
+    try {
+      const plugin = await MemoryPlugin({ worktree: repo } as never)
+      const tools = plugin.tool as unknown as MemoryTools
+      const argsWithoutName = {
+        file_name: "missing_name",
+        description: "Missing name regression",
+        type: "feedback",
+        content: "This call must not persist invalid frontmatter.",
+      } as unknown as Parameters<typeof tools.memory_save.execute>[0]
+
+      await expect(
+        tools.memory_save.execute(argsWithoutName, { callID: "call-missing-name" }),
+      ).rejects.toThrow("Memory name is required")
+      expect(readMemory(repo, "missing_name")).toBeNull()
+      expect(readIndex(repo)).toBe("")
+    } finally {
+      if (originalClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
+      else process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir
+    }
+  })
+
   test("persists human-readable titles across the full plugin tool lifecycle", async () => {
     const repo = makeTempGitRepo()
     const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR

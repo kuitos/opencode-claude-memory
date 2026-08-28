@@ -138,6 +138,9 @@ export function saveMemory(
   content: string,
 ): string {
   const safeName = validateMemoryFileName(fileName)
+  if (typeof name !== "string" || !name.trim()) {
+    throw new Error("Memory name is required")
+  }
   const memDir = getMemoryDir(worktree)
   const filePath = join(memDir, safeName)
 

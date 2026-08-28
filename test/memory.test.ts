@@ -133,6 +133,21 @@ describe("saveMemory and readMemory", () => {
     expect(index).toContain("Indexed Memory")
   })
 
+  test("rejects a missing or blank name without writing memory data", () => {
+    const repo = makeTempGitRepo()
+
+    for (const [fileName, name] of [
+      ["missing_name", undefined],
+      ["blank_name", "   "],
+    ] as const) {
+      expect(() =>
+        saveMemory(repo, fileName, name as never, "Invalid name regression", "user", "Content"),
+      ).toThrow("Memory name is required")
+      expect(readMemory(repo, fileName)).toBeNull()
+    }
+    expect(readIndex(repo)).toBe("")
+  })
+
   test("rejects oversized memory content", () => {
     const repo = makeTempGitRepo()
     const bigContent = "x".repeat(50_000)
