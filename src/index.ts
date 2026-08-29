@@ -14,6 +14,7 @@ import {
   MEMORY_TYPES,
 } from "./memory.js"
 import { getMemoryDir } from "./paths.js"
+import { getNativeExtractTimeoutMs, logNativeExtractionFailure } from "./nativeExtraction.js"
 
 // Per-turn derived state — overwritten each time messages.transform fires.
 // This replaces the old process-global session Maps so that compact naturally
@@ -341,7 +342,6 @@ For each memory worth saving, call \`memory_save\` with:
 6. Do NOT save a memory about the extraction process itself.`
 
 const NATIVE_EXTRACT_DEBOUNCE_MS = 10000
-const NATIVE_EXTRACT_TIMEOUT_MS = 120000 // hard cap on a single extraction fork (prevents permanent leak on hang)
 const NATIVE_EXTRACT_MAX_CONV_CHARS = 60000
 const NATIVE_EXTRACT_GRACE_MS = 60000 // keep forkID in the guard after delete — covers the idle-race window
 const nativeIdleTimer = new Map<string, ReturnType<typeof setTimeout>>()
@@ -417,7 +417,7 @@ type ExtractionClient = {
 
 // Security: the extraction fork runs on raw, potentially-untrusted transcript content (fetched web
 // pages, tool output). It MUST be sandboxed to the memory tools only (no bash/edit/write) and capped
-// by a timeout so a hang can't leak the sub-session forever.
+// by a timeout so a hung prompt stops blocking best-effort sub-session cleanup.
 async function runNativeExtraction(client: unknown, sessionID: string, directory: string): Promise<void> {
   const c = client as ExtractionClient
   if (!c?.session?.messages || !c.session.create || !c.session.prompt) return
@@ -455,10 +455,13 @@ async function runNativeExtraction(client: unknown, sessionID: string, directory
     const extractModel = getNativeExtractModel()
     if (extractModel) body.model = extractModel
 
-    // Race the prompt against a hard timeout so a hung/permission-gated fork can't leak.
+    // Race the prompt against a timeout so a hung/permission-gated fork stops blocking cleanup.
     let timer: ReturnType<typeof setTimeout> | undefined
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("native extraction timed out")), NATIVE_EXTRACT_TIMEOUT_MS)
+      timer = setTimeout(
+        () => reject(new Error("native extraction timed out")),
+        getNativeExtractTimeoutMs(),
+      )
     })
     try {
       await Promise.race([
@@ -469,7 +472,7 @@ async function runNativeExtraction(client: unknown, sessionID: string, directory
       if (timer) clearTimeout(timer)
     }
   } catch (e) {
-    console.error("[opencode-claude-memory] native extraction failed:", (e as Error)?.message ?? e)
+    logNativeExtractionFailure(client, directory, sessionID, e)
   } finally {
     if (forkID) {
       await c.session?.delete?.({ path: { id: forkID }, query: { directory } }).catch(() => {})
@@ -544,7 +547,7 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
         setTimeout(() => {
           nativeIdleTimer.delete(sessionID)
           void runNativeExtraction(client, sessionID, directory).catch((e) => {
-            console.error("[opencode-claude-memory] native extraction failed:", (e as Error)?.message ?? e)
+            logNativeExtractionFailure(client, directory, sessionID, e)
           })
         }, NATIVE_EXTRACT_DEBOUNCE_MS),
       )
