@@ -126,3 +126,23 @@ bin/                              # 删除（见 01 与 07）
 | `docs/superpowers/` 本就未提交，仓库中不存在 | 其 "Future Extensions" 已并入 `test/evals/README.md` | [06 §6.2](06-cleanup.md) |
 
 DoD 逐项核对见 PR 描述。
+
+## 真实环境验证记录（2026-08-31，OpenCode 1.18.16 / macOS）
+
+环境：`opencode serve` + HTTP API 驱动；项目级 `opencode.json` 以 `file://<worktree>` 加载本地构建，`CLAUDE_CONFIG_DIR` 指向临时目录；模型 `opencode/big-pickle`（本机 openai OAuth 已过期、anthropic 代理余额不足，两者都在验证中暴露并被插件正确记录为失败）。
+
+| 检查项 | 结果 |
+|---|---|
+| `PluginOptions` 传入 + strict 校验 | `{"extrct":{}}` → OpenCode 日志 `failed to load plugin … invalid plugin options (<root>: Unrecognized key(s) in object: 'extrct')` |
+| `agent.opencode-memory-*.model` 覆盖 | fork 日志 `agent=opencode-memory-extract modelID=big-pickle`（recall / dream 同样） |
+| 启动 catch-up | 重启后 30ms 内为未提取的旧会话创建 extraction fork，写入 2 个记忆文件 + `MEMORY.md`，watermark 落盘 |
+| 单步问答 recall | 新会话首轮提问，回答引用 `user_tooling_preferences.md`；日志可见 `opencode-memory recall selector` fork |
+| `session.idle` 增量提取 | 第二轮新用户消息 → 仅新增部分被提取；无新用户消息的 idle 不创建 fork |
+| 主 agent 已保存则跳过 LLM | 会话 3 主 agent 调用了 2 次 `memory_save`，之后没有 extraction fork，但 watermark 推进、`sessionsSince` 追加 |
+| auto-dream 门控 + 锁 | `sessionsSince=2` 触发两次 consolidation，`Auto-dream consolidation completed`，`autodream.lock` 释放，`lastConsolidatedAt` 更新、`sessionsSince` 清空 |
+| fork 清理 | 8 个 fork（3 extraction / 3 selector / 2 dream）创建，8 个删除；会话列表只剩用户会话 |
+| `MEMORY.md` 最小编辑 | 手工写入含标题 / 注释 / 空行分组的索引，`memory_save` 只在最后一个指针行后追加，其余行原样 |
+| 失败处理 | provider 401 / 余额不足 → `Memory extraction failed … failures=1` 写入服务日志，watermark 不推进（此项暴露并修复了两个 bug：响应内 `info.error` 未被识别；失败记录被 30 天裁剪立即删除） |
+| 遗留 env | 服务进程继承了本机 shell 的 `OPENCODE_MEMORY_AGENT=memory` 等变量，行为不受影响 |
+
+未覆盖：Windows / Linux 实机（由 CI 三平台矩阵背书）、TUI 退出即关闭进程的 catch-up（用 `serve` 重启等价模拟）。
