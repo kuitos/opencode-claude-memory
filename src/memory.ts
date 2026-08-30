@@ -129,6 +129,13 @@ export function readMemory(worktree: string, fileName: string): MemoryEntry | nu
   }
 }
 
+export type SaveMemoryResult = {
+  filePath: string
+  fileName: string
+  // true when the file and its index pointer already held exactly this content, so nothing was written.
+  unchanged: boolean
+}
+
 export function saveMemory(
   worktree: string,
   fileName: string,
@@ -137,6 +144,19 @@ export function saveMemory(
   type: MemoryType,
   content: string,
 ): string {
+  return saveMemoryDetailed(worktree, fileName, name, description, type, content).filePath
+}
+
+// Same as saveMemory() but reports whether anything was actually written. An identical re-save is a
+// no-op: the extraction fork uses that signal to tell the model it is repeating itself (see #35).
+export function saveMemoryDetailed(
+  worktree: string,
+  fileName: string,
+  name: string,
+  description: string,
+  type: MemoryType,
+  content: string,
+): SaveMemoryResult {
   const safeName = validateMemoryFileName(fileName)
   if (typeof name !== "string" || !name.trim()) {
     throw new Error("Memory name is required")
@@ -150,11 +170,25 @@ export function saveMemory(
       `Memory file content exceeds the ${MAX_MEMORY_FILE_BYTES}-byte limit`,
     )
   }
+
+  if (isMemoryUnchanged(worktree, filePath, fileContent, buildIndexPointer(safeName, name, description))) {
+    return { filePath, fileName: safeName, unchanged: true }
+  }
+
   writeFileSync(filePath, fileContent, "utf-8")
 
   updateIndex(worktree, safeName, name, description)
 
-  return filePath
+  return { filePath, fileName: safeName, unchanged: false }
+}
+
+function isMemoryUnchanged(worktree: string, filePath: string, fileContent: string, pointer: string): boolean {
+  try {
+    if (readFileSync(filePath, "utf-8") !== fileContent) return false
+  } catch {
+    return false
+  }
+  return readIndex(worktree).split("\n").some((line) => line.trimEnd() === pointer)
 }
 
 export function deleteMemory(worktree: string, fileName: string): boolean {
@@ -192,12 +226,16 @@ export function readIndex(worktree: string): string {
   }
 }
 
+function buildIndexPointer(fileName: string, name: string, description: string): string {
+  return `- [${name}](${fileName}) — ${description}`
+}
+
 function updateIndex(worktree: string, fileName: string, name: string, description: string): void {
   const entrypoint = getMemoryEntrypoint(worktree)
   const existing = readIndex(worktree)
   const lines = existing.split("\n").filter((l) => l.trim())
 
-  const pointer = `- [${name}](${fileName}) — ${description}`
+  const pointer = buildIndexPointer(fileName, name, description)
   const existingIdx = lines.findIndex((l) => l.includes(`(${fileName})`))
 
   if (existingIdx >= 0) {
