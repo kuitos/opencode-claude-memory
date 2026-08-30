@@ -6,7 +6,7 @@ import { formatRecalledMemories, recallSelectedMemories, type RecalledMemory } f
 import { isSupportedRecallSelectorClient, selectRelevantMemoryFilenames, type SessionClient } from "./recallSelector.js"
 import { scanMemoryFiles, type MemoryHeader } from "./memoryScan.js"
 import {
-  saveMemory,
+  saveMemoryDetailed,
   deleteMemory,
   listMemories,
   searchMemories,
@@ -14,7 +14,12 @@ import {
   MEMORY_TYPES,
 } from "./memory.js"
 import { getMemoryDir } from "./paths.js"
-import { getNativeExtractTimeoutMs, logNativeExtractionFailure } from "./nativeExtraction.js"
+import {
+  formatMemorySaveResult,
+  getNativeExtractMaxSteps,
+  getNativeExtractTimeoutMs,
+  logNativeExtractionFailure,
+} from "./nativeExtraction.js"
 
 // Per-turn derived state — overwritten each time messages.transform fires.
 // This replaces the old process-global session Maps so that compact naturally
@@ -293,6 +298,12 @@ function getCallID(ctx: unknown): string | undefined {
   return typeof v === "string" ? v : undefined
 }
 
+function getSessionID(ctx: unknown): string | undefined {
+  if (!ctx || typeof ctx !== "object") return undefined
+  const v = (ctx as { sessionID?: unknown }).sessionID
+  return typeof v === "string" ? v : undefined
+}
+
 // ─── Native post-session extraction (optional) ───────────────────────────────
 // Architecture follows opencode-mem's proven pattern: hook `session.idle`,
 // fetch the conversation via ctx.client.session.messages(), then run extraction
@@ -339,7 +350,8 @@ For each memory worth saving, call \`memory_save\` with:
 3. Save each distinct memory as a separate entry
 4. If the conversation was trivial (e.g., just "hello" or a quick lookup), save nothing — that's fine
 5. Be selective: 0-3 memories per session is typical. Quality over quantity.
-6. Do NOT save a memory about the extraction process itself.`
+6. Do NOT save a memory about the extraction process itself.
+7. Each \`memory_save\` call persists immediately and its result lists everything saved so far in this run. Never save the same \`file_name\` twice in one run. When nothing else is worth saving, stop calling tools and reply with a one-line summary.`
 
 const NATIVE_EXTRACT_DEBOUNCE_MS = 10000
 const NATIVE_EXTRACT_MAX_CONV_CHARS = 60000
@@ -347,6 +359,7 @@ const NATIVE_EXTRACT_GRACE_MS = 60000 // keep forkID in the guard after delete �
 const nativeIdleTimer = new Map<string, ReturnType<typeof setTimeout>>()
 const nativeExtractionSessions = new Set<string>() // sub-session IDs → skip their idle AND shield from transforms
 const nativeExtractionInFlight = new Set<string>() // parent sessionIDs with an extraction running → no overlap
+const nativeExtractionSavedFiles = new Map<string, string[]>() // fork sessionID → file names memory_save wrote this run (#35)
 
 function extractIDFromResponse(response: unknown): string | null {
   const data = (response as { data?: unknown } | undefined)?.data ?? response
@@ -411,6 +424,7 @@ type ExtractionClient = {
       query: { directory: string }
       body: { agent: string; system?: string; tools?: Record<string, boolean>; model?: { providerID: string; modelID: string }; parts: unknown[] }
     }) => Promise<unknown>
+    abort?: (args: { path: { id: string }; query: { directory: string } }) => Promise<unknown>
     delete?: (args: { path: { id: string }; query: { directory: string } }) => Promise<unknown>
   }
 }
@@ -425,6 +439,7 @@ async function runNativeExtraction(client: unknown, sessionID: string, directory
 
   nativeExtractionInFlight.add(sessionID)
   let forkID: string | null = null
+  let promptSettled = false
   try {
     // query.directory is required for correct resolution under multi-directory serve.
     const resp = await c.session.messages({ path: { id: sessionID }, query: { directory } })
@@ -468,6 +483,7 @@ async function runNativeExtraction(client: unknown, sessionID: string, directory
         c.session.prompt({ path: { id: forkID }, query: { directory }, body }),
         timeout,
       ])
+      promptSettled = true
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -475,11 +491,19 @@ async function runNativeExtraction(client: unknown, sessionID: string, directory
     logNativeExtractionFailure(client, directory, sessionID, e)
   } finally {
     if (forkID) {
+      // On timeout the server is still running the fork; stop it before deleting the session so it
+      // does not keep inserting parts/messages for a row that no longer exists (FK constraint errors).
+      if (!promptSettled) {
+        await c.session?.abort?.({ path: { id: forkID }, query: { directory } }).catch(() => {})
+      }
       await c.session?.delete?.({ path: { id: forkID }, query: { directory } }).catch(() => {})
       // Hold the guard past delete: the fork's session.idle can arrive on a separate channel after
       // the delete HTTP call resolves, and would otherwise re-trigger extraction of the fork itself.
       const id = forkID
-      setTimeout(() => nativeExtractionSessions.delete(id), NATIVE_EXTRACT_GRACE_MS)
+      setTimeout(() => {
+        nativeExtractionSessions.delete(id)
+        nativeExtractionSavedFiles.delete(id)
+      }, NATIVE_EXTRACT_GRACE_MS)
     }
     nativeExtractionInFlight.delete(sessionID)
   }
@@ -516,10 +540,16 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
       }
       // Dedicated hidden agent for native extraction: its system prompt IS the extraction instruction,
       // so the fork runs with an explicit system (not the build agent's) and tool-restricted to memory_*.
-      mutable.agent[getNativeExtractAgent()] ??= {
+      // `steps` caps the fork's agentic iterations so a model that keeps re-saving the same memories
+      // terminates cleanly (OpenCode forces a text-only reply) instead of spinning until the timeout (#35).
+      const extractAgent = (mutable.agent[getNativeExtractAgent()] ??= {
         mode: "all",
         hidden: true,
         prompt: EXTRACT_PROMPT,
+      })
+      const maxSteps = getNativeExtractMaxSteps()
+      if (maxSteps !== undefined && extractAgent.steps === undefined && extractAgent.maxSteps === undefined) {
+        extractAgent.steps = maxSteps
       }
     },
 
@@ -678,9 +708,15 @@ export const MemoryPlugin: Plugin = async ({ worktree, directory, client }) => {
               "Memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines",
             ),
         },
-        async execute(args, _ctx) {
-          const filePath = saveMemory(memoryRoot, args.file_name, args.name, args.description, args.type, args.content)
-          return `Memory saved to ${filePath}`
+        async execute(args, ctx) {
+          const outcome = saveMemoryDetailed(memoryRoot, args.file_name, args.name, args.description, args.type, args.content)
+          const sessionID = getSessionID(ctx)
+          if (!sessionID || !nativeExtractionSessions.has(sessionID)) return formatMemorySaveResult(outcome)
+          // Extraction fork: record every save so the tool result can carry a durable done-signal.
+          let saved = nativeExtractionSavedFiles.get(sessionID)
+          if (!saved) nativeExtractionSavedFiles.set(sessionID, (saved = []))
+          saved.push(outcome.fileName)
+          return formatMemorySaveResult(outcome, saved)
         },
       }),
 

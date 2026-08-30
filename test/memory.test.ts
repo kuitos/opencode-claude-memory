@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "fs"
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import {
   listMemories,
   saveMemory,
+  saveMemoryDetailed,
   deleteMemory,
   readMemory,
   searchMemories,
@@ -159,6 +160,66 @@ describe("saveMemory and readMemory", () => {
     const repo = makeTempGitRepo()
     const entry = readMemory(repo, "does_not_exist")
     expect(entry).toBeNull()
+  })
+})
+
+describe("saveMemoryDetailed", () => {
+  test("reports unchanged for an identical re-save and writes nothing", () => {
+    const repo = makeTempGitRepo()
+    const first = saveMemoryDetailed(repo, "user_role", "User Role", "Backend engineer", "user", "Works on the API.")
+    expect(first.unchanged).toBe(false)
+    expect(first.fileName).toBe("user_role.md")
+    expect(first.filePath).toBe(join(getMemoryDir(repo), "user_role.md"))
+
+    const memoryPath = first.filePath
+    const indexPath = getMemoryEntrypoint(repo)
+    const before = { memory: readFileSync(memoryPath, "utf-8"), index: readFileSync(indexPath, "utf-8") }
+    // Push both mtimes into the past so an unexpected rewrite is detectable.
+    const past = new Date(Date.now() - 60_000)
+    utimesSync(memoryPath, past, past)
+    utimesSync(indexPath, past, past)
+
+    const second = saveMemoryDetailed(repo, "user_role", "User Role", "Backend engineer", "user", "Works on the API.")
+    expect(second.unchanged).toBe(true)
+    expect(second.filePath).toBe(first.filePath)
+    expect(readFileSync(memoryPath, "utf-8")).toBe(before.memory)
+    expect(readFileSync(indexPath, "utf-8")).toBe(before.index)
+    expect(statSync(memoryPath).mtimeMs).toBe(past.getTime())
+    expect(statSync(indexPath).mtimeMs).toBe(past.getTime())
+  })
+
+  test("treats whitespace-only content differences as unchanged", () => {
+    const repo = makeTempGitRepo()
+    saveMemoryDetailed(repo, "user_role", "User Role", "Backend engineer", "user", "Works on the API.")
+    const again = saveMemoryDetailed(repo, "user_role.md", "User Role", "Backend engineer", "user", "\n  Works on the API.  \n")
+    expect(again.unchanged).toBe(true)
+  })
+
+  test("writes when content, frontmatter, or the index pointer differ", () => {
+    const repo = makeTempGitRepo()
+    saveMemoryDetailed(repo, "user_role", "User Role", "Backend engineer", "user", "Works on the API.")
+
+    const changedContent = saveMemoryDetailed(repo, "user_role", "User Role", "Backend engineer", "user", "Works on the API and the CLI.")
+    expect(changedContent.unchanged).toBe(false)
+    expect(readMemory(repo, "user_role")?.content).toBe("Works on the API and the CLI.")
+
+    const changedDescription = saveMemoryDetailed(repo, "user_role", "User Role", "Backend + CLI engineer", "user", "Works on the API and the CLI.")
+    expect(changedDescription.unchanged).toBe(false)
+    expect(readIndex(repo)).toContain("Backend + CLI engineer")
+    expect(readIndex(repo).trim().split("\n")).toHaveLength(1)
+
+    // A missing index pointer must be repaired even when the memory file itself is identical.
+    writeFileSync(getMemoryEntrypoint(repo), "", "utf-8")
+    const repairedIndex = saveMemoryDetailed(repo, "user_role", "User Role", "Backend + CLI engineer", "user", "Works on the API and the CLI.")
+    expect(repairedIndex.unchanged).toBe(false)
+    expect(readIndex(repo)).toContain("(user_role.md)")
+  })
+
+  test("saveMemory keeps returning the file path", () => {
+    const repo = makeTempGitRepo()
+    const path = saveMemory(repo, "user_role", "User Role", "Backend engineer", "user", "Works on the API.")
+    expect(path).toBe(join(getMemoryDir(repo), "user_role.md"))
+    expect(saveMemory(repo, "user_role", "User Role", "Backend engineer", "user", "Works on the API.")).toBe(path)
   })
 })
 
