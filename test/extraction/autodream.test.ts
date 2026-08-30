@@ -132,7 +132,14 @@ describe("AutoDream.maybeRun", () => {
     const owned = new OwnedSessions()
     const { log, entries } = collectingLog()
     const deps = makeDeps({ store, config, client: selector.client, owned, log, now: () => now })
-    const dream = new AutoDream({ ...deps, client: selector.client, state })
+    // The lock's liveness probe is injected so the test does not depend on which PIDs exist on the runner.
+    const lock = new AutodreamLock(
+      state.lockPath,
+      () => now,
+      4242,
+      () => true,
+    )
+    const dream = new AutoDream({ ...deps, client: selector.client, state, lock })
     return { dream, state, selector, owned, entries, now, store }
   }
 
@@ -182,7 +189,12 @@ describe("AutoDream.maybeRun", () => {
 
   test("skips when another live process holds the lock", async () => {
     const { dream, state, selector, entries } = setup()
-    const lock = new AutodreamLock(state.lockPath, Date.now, process.pid + 1, () => true)
+    const lock = new AutodreamLock(
+      state.lockPath,
+      () => Date.now(),
+      99999,
+      () => true,
+    )
     expect(lock.tryAcquire()).toBe(true)
     expect(await dream.maybeRun("parent")).toBe(false)
     expect(selector.calls).toHaveLength(0)

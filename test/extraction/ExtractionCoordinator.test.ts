@@ -110,7 +110,7 @@ describe("ExtractionCoordinator incremental extraction", () => {
     expect(body?.tools).toEqual({ "*": false, memory_save: true, memory_list: true, memory_read: true })
     expect(String(body?.system)).toContain(EXTRACT_EXISTING_MEMORIES_HEADING)
     expect(String(body?.system)).toContain("existing.md")
-    const text = (body?.parts as Array<{ text: string }>)[0]?.text ?? ""
+    const text = ((body?.parts ?? []) as Array<{ text: string }>)[0]?.text ?? ""
     expect(text).toContain("### User\nI prefer PostgreSQL for everything, turn 1.")
     expect(text).toContain("### Assistant\nNoted, turn 2.")
     expect(text).toContain("_[tool grep: match]_")
@@ -133,7 +133,7 @@ describe("ExtractionCoordinator incremental extraction", () => {
     await idle(coordinator, "ses_2")
     const bodies = promptCalls(selector.calls)
     expect(bodies).toHaveLength(2)
-    const text = (bodies[1]?.parts as Array<{ text: string }>)[0]?.text ?? ""
+    const text = ((bodies[1]?.parts ?? []) as Array<{ text: string }>)[0]?.text ?? ""
     expect(text).toContain("turn 2")
     expect(text).not.toContain("turn 1")
     expect(state.getSession("ses_2")?.lastExtractedMessageID).toBe("ses_2_a2")
