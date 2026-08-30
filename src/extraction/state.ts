@@ -5,7 +5,7 @@ import { join } from "node:path"
 
 export const EXTRACTION_STATE_VERSION = 1
 export const EXTRACTION_STATE_FILE = "extraction-state.json"
-export const AUTODREAM_LOCK_FILE = "autodream.lock"
+export const MAINTENANCE_LOCK_FILE = "maintenance.lock"
 export const SESSION_STATE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 export type SessionExtractionState = {
@@ -73,29 +73,28 @@ export function parseExtractionState(raw: string): ExtractionStateData {
   return data
 }
 
+// Always re-reads the file: several OpenCode processes may maintain the same project (#30), so an
+// in-memory copy would silently overwrite their updates. The file is tiny and writes are rare.
 export class ExtractionStateStore {
   readonly filePath: string
   readonly lockPath: string
-  private cache: ExtractionStateData | undefined
 
   constructor(
     readonly stateDir: string,
     private readonly now: () => number = Date.now,
   ) {
     this.filePath = join(stateDir, EXTRACTION_STATE_FILE)
-    this.lockPath = join(stateDir, AUTODREAM_LOCK_FILE)
+    this.lockPath = join(stateDir, MAINTENANCE_LOCK_FILE)
   }
 
   read(): ExtractionStateData {
-    if (this.cache) return this.cache
     let raw = ""
     try {
       raw = readFileSync(this.filePath, "utf-8")
     } catch {
       // first run
     }
-    this.cache = parseExtractionState(raw)
-    return this.cache
+    return parseExtractionState(raw)
   }
 
   getSession(sessionID: string): SessionExtractionState | undefined {

@@ -124,6 +124,7 @@ bin/                              # 删除（见 01 与 07）
 | `catchUp()` 在 `config` hook 触发 | 需要 merge 后的 agent 沙箱 | [01 §2.2](01-extraction-unification.md) |
 | 目标 OpenCode ≥ 1.18（`engines.opencode`） | 本机运行时 1.18.16；`PluginModule` 与 `PluginOptions` 均在此版本验证 | [04 §实施步骤 6](04-configuration.md) |
 | `docs/superpowers/` 本就未提交，仓库中不存在 | 其 "Future Extensions" 已并入 `test/evals/README.md` | [06 §6.2](06-cleanup.md) |
+| extraction fork 与 auto-dream 共用跨进程 `maintenance.lock`；`extraction-state.json` 不缓存 | 关闭 issue #30 剩余的"两个进程同一仓库"场景 | [01 §2.3](01-extraction-unification.md) |
 
 DoD 逐项核对见 PR 描述。
 
@@ -139,7 +140,7 @@ DoD 逐项核对见 PR 描述。
 | 单步问答 recall | 新会话首轮提问，回答引用 `user_tooling_preferences.md`；日志可见 `opencode-memory recall selector` fork |
 | `session.idle` 增量提取 | 第二轮新用户消息 → 仅新增部分被提取；无新用户消息的 idle 不创建 fork |
 | 主 agent 已保存则跳过 LLM | 会话 3 主 agent 调用了 2 次 `memory_save`，之后没有 extraction fork，但 watermark 推进、`sessionsSince` 追加 |
-| auto-dream 门控 + 锁 | `sessionsSince=2` 触发两次 consolidation，`Auto-dream consolidation completed`，`autodream.lock` 释放，`lastConsolidatedAt` 更新、`sessionsSince` 清空 |
+| auto-dream 门控 + 锁 | `sessionsSince=2` 触发两次 consolidation，`Auto-dream consolidation completed`，`maintenance.lock` 释放，`lastConsolidatedAt` 更新、`sessionsSince` 清空 |
 | fork 清理 | 8 个 fork（3 extraction / 3 selector / 2 dream）创建，8 个删除；会话列表只剩用户会话 |
 | `MEMORY.md` 最小编辑 | 手工写入含标题 / 注释 / 空行分组的索引，`memory_save` 只在最后一个指针行后追加，其余行原样 |
 | 失败处理 | provider 401 / 余额不足 → `Memory extraction failed … failures=1` 写入服务日志，watermark 不推进（此项暴露并修复了两个 bug：响应内 `info.error` 未被识别；失败记录被 30 天裁剪立即删除） |

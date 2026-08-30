@@ -28,7 +28,8 @@ src/
 │   ├── prompts.ts                # EXTRACT_PROMPT / AUTODREAM_PROMPT (only copies)
 │   ├── forkSession.ts            # create → prompt(timeout) → abort-on-timeout → delete; shared by recall/extract/dream
 │   ├── state.ts                  # extraction-state.json (watermarks, autodream gate), atomic writes, v1 lock migration, posixCksum
-│   ├── autodream.ts              # Gate, cross-process lock, consolidation fork
+│   ├── lock.ts                   # Cross-process maintenance lock (extraction + auto-dream), stale/dead-PID detection
+│   ├── autodream.ts              # Gate + consolidation fork
 │   └── ExtractionCoordinator.ts  # session.idle debounce → serial queue → incremental fork; start-up catch-up; recordSave
 ├── hooks/
 │   ├── messages.ts               # getLastUserQuery / buildTurnID / extractRecentTools / surfaced-memory keys
@@ -95,7 +96,7 @@ test/
 | `FORK_GRACE_MS` | 60 s | `extraction/ExtractionCoordinator.ts` |
 | `MAX_EXTRACTION_FAILURES` | 3 | `extraction/ExtractionCoordinator.ts` |
 | `SESSION_STATE_TTL_MS` (extraction state) | 30 d | `extraction/state.ts` |
-| `AUTODREAM_STALE_LOCK_MS` | 1 h | `extraction/autodream.ts` |
+| `MAINTENANCE_STALE_LOCK_MS` | 1 h | `extraction/lock.ts` |
 
 ## Commands
 
@@ -111,7 +112,7 @@ bun run build            # dist/ via tsconfig.build.json
 ## Notes
 
 - Memory directory: `<CLAUDE_CONFIG_DIR>/projects/<sanitizePath(canonicalGitRoot)>/memory/`, shared with Claude Code. `sanitizePath` / `djb2Hash` are exact copies of Claude Code's.
-- Plugin state: `<CLAUDE_CONFIG_DIR>/opencode-memory/<same key>/extraction-state.json` (+ `autodream.lock`). A v1 `<cksum>.consolidate-lock` is migrated on first catch-up.
+- Plugin state: `<CLAUDE_CONFIG_DIR>/opencode-memory/<same key>/extraction-state.json` (+ `maintenance.lock`, shared by extraction forks and auto-dream across processes). A v1 `<cksum>.consolidate-lock` is migrated on first catch-up.
 - Agent names are fixed: `opencode-memory-recall`, `opencode-memory-extract`, `opencode-memory-dream`. The `config` hook merges defaults under whatever the user configured.
 - OpenCode dedupes `plugin` entries by package name across global/project config, last one wins — plugin options are not merged across files.
 - Design history for v2 lives in `docs/v2/`.

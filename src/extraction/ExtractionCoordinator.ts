@@ -9,6 +9,7 @@ import { getErrorMessage, type Logger } from "../util/log.js"
 import type { OwnedSessions } from "../util/ownedSessions.js"
 import { AutoDream } from "./autodream.js"
 import { runForkSession } from "./forkSession.js"
+import { MaintenanceLock } from "./lock.js"
 import { buildExtractionSystemPrompt } from "./prompts.js"
 import { ExtractionStateStore, migrateLegacyAutodreamState, type SessionExtractionState } from "./state.js"
 
@@ -82,11 +83,13 @@ export type ExtractionCoordinatorDeps = {
   log: Logger
   now?: () => number
   state?: ExtractionStateStore
+  lock?: MaintenanceLock
 }
 
 export class ExtractionCoordinator {
   readonly state: ExtractionStateStore
   readonly autodream: AutoDream | undefined
+  private readonly lock: MaintenanceLock
   private readonly now: () => number
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly inFlight = new Set<string>()
@@ -99,8 +102,9 @@ export class ExtractionCoordinator {
   constructor(private readonly deps: ExtractionCoordinatorDeps) {
     this.now = deps.now ?? Date.now
     this.state = deps.state ?? new ExtractionStateStore(deps.store.stateDir, this.now)
+    this.lock = deps.lock ?? new MaintenanceLock(this.state.lockPath, this.now)
     this.autodream = deps.client
-      ? new AutoDream({ ...deps, client: deps.client, state: this.state, now: this.now })
+      ? new AutoDream({ ...deps, client: deps.client, state: this.state, now: this.now, lock: this.lock })
       : undefined
   }
 
@@ -240,6 +244,13 @@ export class ExtractionCoordinator {
         return
       }
 
+      // Cross-process serialisation (#30): another OpenCode process on this project is extracting or
+      // consolidating right now. Skip without touching the watermark; the next idle / start-up retries.
+      if (!this.lock.tryAcquire()) {
+        log("info", "Memory extraction skipped: another process holds the maintenance lock", { sessionID })
+        return
+      }
+
       try {
         await runForkSession({
           client,
@@ -277,6 +288,8 @@ export class ExtractionCoordinator {
           })
         }
         return
+      } finally {
+        this.lock.release()
       }
 
       advance()

@@ -7,6 +7,7 @@ import {
   MAX_EXTRACTION_FAILURES,
   sliceNewMessages,
 } from "../../src/extraction/ExtractionCoordinator.js"
+import { MaintenanceLock } from "../../src/extraction/lock.js"
 import { EXTRACT_EXISTING_MEMORIES_HEADING } from "../../src/extraction/prompts.js"
 import { ExtractionStateStore } from "../../src/extraction/state.js"
 import type { ChatMessage } from "../../src/sdk.js"
@@ -57,6 +58,13 @@ function setup(options: { conversations?: Conversation; sessions?: unknown[]; co
   const coordinator = new ExtractionCoordinator({
     ...makeDeps({ store, config, client: selector.client, owned, log, now: () => now }),
     state,
+    // Liveness probe injected so lock tests do not depend on which PIDs exist on the runner.
+    lock: new MaintenanceLock(
+      state.lockPath,
+      () => now,
+      4242,
+      () => true,
+    ),
   })
   const tick = (ms: number) => {
     now += ms
@@ -248,6 +256,38 @@ describe("ExtractionCoordinator incremental extraction", () => {
       message: "Memory extraction failed",
       extra: { error: "gateway unavailable", sessionID: "ses_10", failures: 1 },
     })
+  })
+})
+
+describe("ExtractionCoordinator cross-process lock (#30)", () => {
+  test("skips the fork and leaves the watermark alone while another live process holds the lock", async () => {
+    const { coordinator, selector, conversations, state, entries } = setup()
+    conversations.ses_lock = conversation("ses_lock", 1)
+    const other = new MaintenanceLock(state.lockPath, Date.now, 99999, () => true)
+    expect(other.tryAcquire()).toBe(true)
+
+    await idle(coordinator, "ses_lock")
+    expect(methods(selector.calls)).toEqual(["messages"])
+    expect(state.getSession("ses_lock")).toBeUndefined()
+    expect(entries.some((e) => e.level === "info" && String(e.message).includes("maintenance lock"))).toBe(true)
+
+    other.release()
+    await idle(coordinator, "ses_lock")
+    expect(promptCalls(selector.calls)).toHaveLength(1)
+    expect(state.getSession("ses_lock")?.lastExtractedMessageID).toBe("ses_lock_a1")
+    // released after the run so the next process (or auto-dream) can take it
+    expect(new MaintenanceLock(state.lockPath, Date.now, 4242, () => true).tryAcquire()).toBe(true)
+  })
+
+  test("state updates are read from disk, so a change written by another process is not overwritten", async () => {
+    const { coordinator, conversations, state } = setup()
+    conversations.ses_a = conversation("ses_a", 1)
+    // Another process recorded its own session between our reads.
+    new ExtractionStateStore(state.stateDir).update((data) => {
+      data.sessions.other_process = { lastExtractedMessageID: "x", updatedAt: Date.now(), failures: 0 }
+    })
+    await idle(coordinator, "ses_a")
+    expect(Object.keys(state.read().sessions).sort()).toEqual(["other_process", "ses_a"])
   })
 })
 

@@ -131,7 +131,7 @@ class ExtractionCoordinator {
 - `sessionsSince` 由 `runIncremental` 成功时追加（去重），不再需要 `opencode session list` + `jq` 计数
 - 通过 `runForkSession` 执行 `AUTODREAM_PROMPT`，工具白名单 `memory_list / memory_search / memory_read / memory_save / memory_delete`
 - 成功则更新 `lastConsolidatedAt`、清空 `sessionsSince`；失败不改状态（等价于 bash 的 rollback）
-- 互斥：进程内用 coordinator 的串行队列；跨进程用 `extraction-state.json` 旁的 `autodream.lock`（内容为 `{ pid, startedAt }` JSON，超过 1h 或持有进程已死视为 stale；`wx` 独占创建）——这是 v1 `try_acquire_consolidation_lock` 的直接移植
+- 互斥：进程内用 coordinator 的串行队列；跨进程用 `extraction-state.json` 旁的 `maintenance.lock`（内容为 `{ pid, startedAt }` JSON，超过 1h 或持有进程已死视为 stale；`wx` 独占创建）——这是 v1 `try_acquire_consolidation_lock` 的直接移植。**实现补充（#30）**：这把锁由 extraction fork 与 auto-dream 共用（`extraction/lock.ts` 的 `MaintenanceLock`），extraction 在 fork + watermark 写入期间持有，争用时跳过且不动 watermark（下次 idle / 启动重试）；`extraction-state.json` 不做内存缓存，每次 update 都重新读文件，避免多进程互相覆盖
 - 超时：`autodream.timeoutMs`（默认 300s），与 extraction 分开配置
 - v1 迁移：`extraction/state.ts` 用 TS 实现 POSIX `cksum`，按 v1 的 key（git toplevel / worktree / canonical root 三个候选）查找 `<CLAUDE_CONFIG_DIR>/opencode-memory/<cksum>.consolidate-lock`，把 mtime 写成 `lastConsolidatedAt` 后删除
 
