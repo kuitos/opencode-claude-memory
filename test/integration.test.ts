@@ -1,149 +1,96 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync } from "fs"
-import { tmpdir } from "os"
-import { join } from "path"
-import { saveMemory, deleteMemory, listMemories, searchMemories, readMemory, readIndex } from "../src/memory.js"
-import { recallSelectedMemories, formatRecalledMemories } from "../src/recall.js"
-import { scanMemoryFiles } from "../src/memoryScan.js"
-import { buildMemorySystemPrompt } from "../src/prompt.js"
-import { getMemoryDir } from "../src/paths.js"
+import { buildMemorySystemPrompt } from "../src/prompt/systemPrompt.js"
+import { formatRecalledMemories, recallSelectedMemories } from "../src/recall/format.js"
+import { cleanupTempDirs, makeStore } from "./helpers/index.js"
 
-const tempDirs: string[] = []
-
-function makeTempGitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "integration-test-"))
-  mkdirSync(join(root, ".git"), { recursive: true })
-  tempDirs.push(root)
-  return root
-}
-
-afterEach(() => {
-  while (tempDirs.length > 0) {
-    const dir = tempDirs.pop()
-    if (dir) rmSync(dir, { recursive: true, force: true })
-  }
-})
-
-function recallByFilename(repo: string, filenames: string[], alreadySurfaced: ReadonlySet<string> = new Set()) {
-  return recallSelectedMemories(scanMemoryFiles(getMemoryDir(repo)), filenames, alreadySurfaced)
-}
+afterEach(cleanupTempDirs)
 
 describe("end-to-end memory lifecycle", () => {
   test("save → list → search → read → recall → delete", () => {
-    const repo = makeTempGitRepo()
+    const store = makeStore()
 
-    saveMemory(
-      repo,
-      "user_role",
-      "User Role",
-      "User is a backend engineer",
-      "user",
-      "Senior backend engineer specializing in Go and Rust",
-    )
-    saveMemory(
-      repo,
-      "feedback_testing",
-      "Testing Approach",
-      "Always use integration tests",
-      "feedback",
-      "Never mock the database.\n\n**Why:** Mocked tests masked a broken migration.\n**How to apply:** All DB tests hit a real test database.",
-    )
-    saveMemory(
-      repo,
-      "project_freeze",
-      "Merge Freeze",
-      "Merge freeze starts 2026-04-10",
-      "project",
-      "Mobile team cutting release branch.\n\n**Why:** Prevent destabilizing mobile release.\n**How to apply:** Hold non-critical PRs until freeze lifts.",
-    )
+    store.save({
+      fileName: "user_role",
+      name: "User Role",
+      description: "User is a backend engineer",
+      type: "user",
+      content: "Senior backend engineer specializing in Go and Rust",
+    })
+    store.save({
+      fileName: "feedback_testing",
+      name: "Testing Approach",
+      description: "Always use integration tests",
+      type: "feedback",
+      content:
+        "Never mock the database.\n\n**Why:** Mocked tests masked a broken migration.\n**How to apply:** All DB tests hit a real test database.",
+    })
+    store.save({
+      fileName: "project_freeze",
+      name: "Merge Freeze",
+      description: "Merge freeze starts 2026-04-10",
+      type: "project",
+      content: "Mobile team cutting release branch.",
+    })
 
-    const all = listMemories(repo)
-    expect(all).toHaveLength(3)
+    expect(store.list()).toHaveLength(3)
+    expect(store.search("database").map((e) => e.name)).toEqual(["Testing Approach"])
+    expect(store.read("user_role")).toMatchObject({ type: "user" })
+    expect(store.read("user_role")?.body).toContain("Go and Rust")
 
-    const searchResults = searchMemories(repo, "database")
-    expect(searchResults).toHaveLength(1)
-    expect(searchResults[0]!.name).toBe("Testing Approach")
+    const index = store.readIndex()
+    for (const file of ["user_role.md", "feedback_testing.md", "project_freeze.md"]) expect(index).toContain(file)
 
-    const entry = readMemory(repo, "user_role")
-    expect(entry).not.toBeNull()
-    expect(entry!.type).toBe("user")
-    expect(entry!.content).toContain("Go and Rust")
-
-    const index = readIndex(repo)
-    expect(index).toContain("user_role.md")
-    expect(index).toContain("feedback_testing.md")
-    expect(index).toContain("project_freeze.md")
-
-    const recalled = recallByFilename(repo, ["feedback_testing.md"])
-    expect(recalled.length).toBeGreaterThan(0)
-    expect(recalled[0]!.name).toBe("Testing Approach")
-
-    const recalledFormatted = formatRecalledMemories(recalled)
-    expect(recalledFormatted).toContain("## Recalled Memories")
-
-    const deleted = deleteMemory(repo, "project_freeze")
-    expect(deleted).toBe(true)
-
-    const afterDelete = listMemories(repo)
-    expect(afterDelete).toHaveLength(2)
-    expect(afterDelete.map((e) => e.name)).not.toContain("Merge Freeze")
-
-    const indexAfterDelete = readIndex(repo)
-    expect(indexAfterDelete).not.toContain("project_freeze.md")
-  })
-
-  test("recalled memories feed into buildMemorySystemPrompt", () => {
-    const repo = makeTempGitRepo()
-
-    saveMemory(
-      repo,
-      "prompt_test",
-      "Prompt Test Memory",
-      "Memory for prompt integration test",
-      "user",
-      "This should appear in recalled section",
-    )
-
-    const recalled = recallByFilename(repo, ["prompt_test.md"])
-    const recalledSection = formatRecalledMemories(recalled)
-    const prompt = buildMemorySystemPrompt(repo, recalledSection)
-
+    const recalled = recallSelectedMemories(store.scan(), ["feedback_testing.md"])
+    expect(recalled[0]?.name).toBe("Testing Approach")
+    const prompt = buildMemorySystemPrompt(store, formatRecalledMemories(recalled))
     expect(prompt).toContain("# Auto Memory")
-    expect(prompt).toContain("prompt_test.md")
+    expect(prompt).toContain("feedback_testing.md")
     expect(prompt).toContain("## Recalled Memories")
-    expect(prompt).toContain("Prompt Test Memory")
+    expect(prompt).toContain("Never mock the database.")
+
+    expect(store.delete("project_freeze")).toBe(true)
+    expect(store.list().map((e) => e.name)).not.toContain("Merge Freeze")
+    expect(store.readIndex()).not.toContain("project_freeze.md")
   })
 
   test("alreadySurfaced prevents double-recall", () => {
-    const repo = makeTempGitRepo()
-
-    saveMemory(repo, "seen", "Already Seen", "Was shown before", "user", "Already surfaced content")
-    saveMemory(repo, "unseen", "Not Seen", "Fresh content", "feedback", "New content")
-
-    const result = recallByFilename(repo, ["seen.md", "unseen.md"], new Set(["Already Seen|user"]))
-
-    expect(result).toHaveLength(1)
-    expect(result[0]!.name).toBe("Not Seen")
+    const store = makeStore()
+    store.save({
+      fileName: "seen",
+      name: "Already Seen",
+      description: "Was shown before",
+      type: "user",
+      content: "Already surfaced content",
+    })
+    store.save({
+      fileName: "unseen",
+      name: "Not Seen",
+      description: "Fresh content",
+      type: "feedback",
+      content: "New content",
+    })
+    const result = recallSelectedMemories(store.scan(), ["seen.md", "unseen.md"], new Set(["Already Seen|user"]))
+    expect(result.map((m) => m.name)).toEqual(["Not Seen"])
   })
 
   test("overwriting a memory updates content and index", () => {
-    const repo = makeTempGitRepo()
-
-    saveMemory(repo, "evolving", "Version 1", "Original description", "user", "Original content")
-
-    let entry = readMemory(repo, "evolving")
-    expect(entry!.name).toBe("Version 1")
-    expect(entry!.content).toBe("Original content")
-
-    saveMemory(repo, "evolving", "Version 2", "Updated description", "feedback", "Updated content")
-
-    entry = readMemory(repo, "evolving")
-    expect(entry!.name).toBe("Version 2")
-    expect(entry!.type).toBe("feedback")
-    expect(entry!.content).toBe("Updated content")
-
-    const index = readIndex(repo)
-    expect(index).toContain("Version 2")
-    expect(index).not.toContain("Version 1")
+    const store = makeStore()
+    store.save({
+      fileName: "evolving",
+      name: "Version 1",
+      description: "Original description",
+      type: "user",
+      content: "Original content",
+    })
+    store.save({
+      fileName: "evolving",
+      name: "Version 2",
+      description: "Updated description",
+      type: "feedback",
+      content: "Updated content",
+    })
+    expect(store.read("evolving")).toMatchObject({ name: "Version 2", type: "feedback", body: "Updated content" })
+    expect(store.readIndex()).toContain("Version 2")
+    expect(store.readIndex()).not.toContain("Version 1")
   })
 })

@@ -1,126 +1,117 @@
 # AGENTS.md
 
-OpenCode plugin that replicates Claude Code's persistent memory system. TypeScript on Bun, consumed as raw `.ts` by OpenCode (no build step). Published to npm via semantic-release.
+OpenCode plugin that replicates Claude Code's persistent memory system. TypeScript on Bun; published to npm as compiled `dist/` via semantic-release. Requires OpenCode ≥ 1.18 (plugin options, `PluginModule` default export).
 
 ## Structure
 
 ```
-.
-├── bin/opencode-memory  # Bash wrapper: shell hook install + post-session extraction + auto-dream consolidation
-├── src/
-│   ├── index.ts         # Plugin entry: MemoryPlugin export, 5 tools + system prompt hook
-│   ├── memory.ts        # CRUD: save/delete/list/search/read + MEMORY.md index management + truncateEntrypoint
-│   ├── memoryScan.ts    # Recursive memory directory scanner: MemoryHeader[], frontmatter parsing, manifest formatting
-│   ├── paths.ts         # Path resolution + security: ~/.claude/projects/<hash>/memory/
-│   ├── prompt.ts        # System prompt builder: type instructions + index + recalled content (aligned with Claude Code memoryTypes.ts)
-│   └── recall.ts        # Smart recall: keyword scoring via scanMemoryFiles, mtime fallback, truncation, age warnings
-├── test/
-│   ├── integration.test.ts       # End-to-end lifecycle: save→list→search→read→recall→delete
-│   ├── memory.test.ts            # Unit tests for memory.ts (truncateEntrypoint, CRUD, index)
-│   ├── memoryScan.test.ts        # Unit tests for memoryScan.ts (scan, frontmatter, manifest)
-│   ├── prompt.test.ts            # Unit tests for prompt.ts (buildMemorySystemPrompt)
-│   ├── recall.test.ts            # Unit tests for recall.ts (scoring, recall, formatting)
-│   ├── opencode-memory.test.ts   # Bash wrapper tests (TMPDIR normalization, log toggle)
-│   └── github-actions-ci.test.ts # CI workflow smoke test
-├── .releaserc           # semantic-release config
-└── tsconfig.json        # moduleResolution: bundler, types: bun-types
+src/
+├── index.ts                      # Assembly only: parseConfig → MemoryStore → coordinators → Hooks. Default export { id, server }.
+├── config.ts                     # PluginOptions zod schema (strict) + CLAUDE_CONFIG_DIR → MemoryConfig; fixed agent names
+├── agents.ts                     # Hidden agent defaults (recall/extract/dream) merged under user overrides in the `config` hook
+├── sdk.ts                        # Type aliases derived from @opencode-ai/plugin (client, events, messages) + unwrapData
+├── tools.ts                      # memory_save / delete / list / search / read; results carry their own titles
+├── store/
+│   ├── frontmatter.ts            # THE memory file format: MEMORY_TYPES, parseFrontmatter (30-line limit), buildFrontmatter
+│   ├── paths.ts                  # Pure: validateMemoryFileName (sub-paths), sanitizePath, findCanonicalGitRoot, resolveMemoryRoot
+│   ├── scan.ts                   # THE scanner: MemoryHeader/MemoryEntry, defaults decided once, manifest, surfaceKey
+│   ├── indexFile.ts              # MEMORY.md minimal line-level upsert/remove + truncateEntrypoint
+│   └── MemoryStore.ts            # Resolves paths once; list/read/save/delete/search/scan/readIndex; stateDir
+├── prompt/
+│   ├── sections.ts               # Claude Code prompt text ports (memoryTypes.ts / memdir.ts)
+│   └── systemPrompt.ts           # buildMemorySystemPrompt(store, recalled, opts); AUTO_MEMORY_MARKER
+├── recall/
+│   ├── selector.ts               # LLM selection in a hidden child session (structured output)
+│   ├── format.ts                 # recallSelectedMemories / formatRecalledMemories / truncation / age warning
+│   └── RecallCoordinator.ts      # Per-session turn state, prefetch with bounded wait, session-scoped ignore, TTL eviction
+├── extraction/
+│   ├── prompts.ts                # EXTRACT_PROMPT / AUTODREAM_PROMPT (only copies)
+│   ├── forkSession.ts            # create → prompt(timeout) → abort-on-timeout → delete; shared by recall/extract/dream
+│   ├── state.ts                  # extraction-state.json (watermarks, autodream gate), atomic writes, v1 lock migration, posixCksum
+│   ├── autodream.ts              # Gate, cross-process lock, consolidation fork
+│   └── ExtractionCoordinator.ts  # session.idle debounce → serial queue → incremental fork; start-up catch-up; recordSave
+├── hooks/
+│   ├── messages.ts               # getLastUserQuery / buildTurnID / extractRecentTools / surfaced-memory keys
+│   └── ignore.ts                 # ignore / resume detection, stripAutoMemoryParts (by marker)
+└── util/
+    ├── log.ts                    # client.app.log wrapper (never stderr)
+    └── ownedSessions.ts          # Plugin-owned child sessions with grace-period release
+
+test/
+├── helpers/index.ts              # temp dirs, makeStore/makeConfig/makePlugin (env injected), mock clients, message builders
+├── *.test.ts, store/, recall/, extraction/   # unit + plugin-level tests (bun test)
+└── evals/                        # task evals: memory-on vs memory-off system prompts (see test/evals/README.md)
 ```
 
-## Where to Look
+## Where to look
 
 | Task | File |
-|------|------|
-| Add/modify a memory tool | `src/index.ts` — tool definitions in `tool:` section |
-| Change memory file format | `src/memory.ts` — `parseFrontmatter()`, `buildFrontmatter()` |
-| Fix path resolution or worktree sharing | `src/paths.ts` — `getMemoryDir()`, `findCanonicalGitRoot()` |
-| Modify what the agent sees about memory | `src/prompt.ts` — `buildMemorySystemPrompt()` |
-| Change which memories are auto-recalled | `src/recall.ts` — `recallRelevantMemories()` |
-| Scan memory directory / build manifest | `src/memoryScan.ts` — `scanMemoryFiles()`, `formatMemoryManifest()` |
-| Fix post-session extraction | `bin/opencode-memory` — bash wrapper |
-| Fix shell hook install/uninstall | `bin/opencode-memory` — `install`/`uninstall` subcommands |
-
-## Critical Coupling
-
-```
-paths.ts ──exports constants + validateMemoryFileName──► memory.ts
-memory.ts ──exports listMemories + MemoryEntry──────────► recall.ts
-memory.ts + paths.ts ──exports readIndex, getMemoryDir──► prompt.ts
-memoryScan.ts ──exports scanMemoryFiles, MemoryHeader───► recall.ts
-memoryScan.ts ──imports getMemoryDir, ENTRYPOINT_NAME───► paths.ts
-ALL ────────────────────────────────────────────────────► index.ts
-```
-
-If you rename or change exports in `paths.ts` or `memory.ts`, check all downstream imports.
+|---|---|
+| Add or change a plugin option | `src/config.ts` (schema) → consumers via `MemoryConfig` |
+| Change a hidden agent default (model, steps, tools) | `src/agents.ts` |
+| Add/modify a memory tool | `src/tools.ts` |
+| Change the memory file format | `src/store/frontmatter.ts` |
+| Path resolution / worktree sharing / file-name rules | `src/store/paths.ts`, `src/store/MemoryStore.ts` |
+| `MEMORY.md` editing rules | `src/store/indexFile.ts` |
+| What the main agent sees about memory | `src/prompt/systemPrompt.ts`, `src/prompt/sections.ts` |
+| Which memories are recalled and when | `src/recall/RecallCoordinator.ts`, `src/recall/selector.ts` |
+| Extraction trigger, watermark, catch-up | `src/extraction/ExtractionCoordinator.ts`, `src/extraction/state.ts` |
+| Auto-dream gate / lock | `src/extraction/autodream.ts` |
+| Child session lifecycle / timeouts | `src/extraction/forkSession.ts` |
 
 ## Conventions
 
-- **ESM `.js` imports**: All TypeScript imports use `.js` extension (`import { foo } from "./bar.js"`)
-- **No linter/formatter**: No eslintrc, prettierrc — no enforced style
-- **Published package is built**: `tsc` emits `dist/`, and npm publishes the compiled output
-- **Tests via Bun**: `bun test` runs all `test/*.test.ts` files
-- **Silent catch blocks**: Intentional — file operations fail gracefully (file may not exist)
-- **`@opencode-ai/plugin`** is a peerDependency, `bun-types` provides Node globals
+- **ESM `.js` imports**, `node:` protocol for built-ins.
+- **biome** for lint + format (`bun run lint`); `tsconfig.json` covers `src` and `test` with `noUncheckedIndexedAccess`; `tsconfig.build.json` emits `dist/`.
+- **No process-level state**: every `Map`/`Set` lives on a coordinator instance created per `MemoryPlugin` call. `grep -rn "^const .* = new \(Map\|Set\)" src/` must stay empty.
+- **No environment variables except `CLAUDE_CONFIG_DIR`** (read in `config.ts` only). Tests inject `env` via `createMemoryPlugin(env)` / `parseConfig(options, env)` and never write `process.env`.
+- **Logging** goes through `client.app.log` (`util/log.ts`); stderr is rendered into the chat UI.
+- **Silent catch blocks** around file I/O are intentional (files may not exist).
+- **`@opencode-ai/plugin`** is a peer dependency; SDK types are derived in `src/sdk.ts` — do not hand-write client subsets.
 
-## Anti-Patterns
+## Anti-patterns
 
-- **NEVER** bypass `validateMemoryFileName()` before fs access to memory files — path traversal risk
-- **NEVER** use `MEMORY` as a memory file name — reserved for the index (`MEMORY.md`)
-- **NEVER** write to memory directory without going through `saveMemory()` — index gets out of sync
-- **NEVER** assume memory content is fresh — files can be arbitrarily old, always check `ageInDays`
+- **NEVER** touch memory files without `resolveMemoryFilePath()` / `MemoryStore` — path traversal risk; `MEMORY` is reserved.
+- **NEVER** rewrite `MEMORY.md` wholesale — use `upsertIndexLine` / `removeIndexLine` (Claude Code formatting must survive).
+- **NEVER** run a fork without a tool sandbox and timeout (`runForkSession` with `tools` and `timeoutMs`); forks read untrusted transcript content.
+- **NEVER** treat a plugin-owned session (`OwnedSessions`) as a user session in hooks or events.
+- **NEVER** assume memory content is fresh — recalled memories carry `ageInDays`.
 
 ## Security
 
-`paths.ts` has two security-critical areas:
-
-1. **`validateMemoryFileName()`** — rejects `../`, `/`, `\`, `\0`, dotfiles, reserved names
-2. **`resolveCanonicalRoot()`** — validates worktree gitdir→commondir→backlink chain to prevent a malicious `.git` file from redirecting memory to an arbitrary directory
+- `store/paths.ts`: `validateMemoryFileName()` rejects traversal, absolute paths, dotfiles, null bytes and the reserved name; `resolveMemoryFilePath()` re-checks containment after resolution. `resolveCanonicalRoot()` validates the worktree gitdir → commondir → backlink chain.
+- `extraction/forkSession.ts` + `agents.ts`: forks run hidden agents whose tools are `{"*": false, memory_*: true}`; the same sandbox is passed in the prompt body as defence in depth.
 
 ## Constants
 
 | Constant | Value | Location |
-|----------|-------|----------|
-| `MAX_MEMORY_FILES` | 200 | `paths.ts` |
-| `MAX_MEMORY_FILE_BYTES` | 40,000 | `paths.ts` |
-| `FRONTMATTER_MAX_LINES` | 30 | `paths.ts` |
-| `MAX_RECALLED_MEMORIES` | 5 | `recall.ts` |
-| `MAX_MEMORY_LINES` (recall) | 200 | `recall.ts` |
-| `MAX_MEMORY_BYTES` (recall) | 4,096 | `recall.ts` |
-| `MAX_ENTRYPOINT_LINES` | 200 | `paths.ts` |
-| `MAX_ENTRYPOINT_BYTES` | 25,000 | `paths.ts` |
+|---|---|---|
+| `MAX_MEMORY_FILES` | 200 | `store/paths.ts` |
+| `MAX_MEMORY_FILE_BYTES` | 40,000 | `store/paths.ts` |
+| `FRONTMATTER_MAX_LINES` | 30 | `store/frontmatter.ts` |
+| `MAX_ENTRYPOINT_LINES` / `MAX_ENTRYPOINT_BYTES` | 200 / 25,000 | `store/paths.ts` |
+| recall `MAX_MEMORY_LINES` / `MAX_MEMORY_BYTES` | 200 / 4,096 | `recall/format.ts` |
+| `SESSION_STATE_TTL_MS` (recall) | 1 h | `recall/RecallCoordinator.ts` |
+| `FORK_GRACE_MS` | 60 s | `extraction/ExtractionCoordinator.ts` |
+| `MAX_EXTRACTION_FAILURES` | 3 | `extraction/ExtractionCoordinator.ts` |
+| `SESSION_STATE_TTL_MS` (extraction state) | 30 d | `extraction/state.ts` |
+| `AUTODREAM_STALE_LOCK_MS` | 1 h | `extraction/autodream.ts` |
 
 ## Commands
 
 ```bash
-# Run tests
-bun test
-
-# Build published artifacts
-bun run build
-
-# Release: push to main triggers semantic-release → npm publish
-git push origin main
-
-# Local dev: edit src/, then run build if you need the packaged entrypoints
+bun install
+bun test                 # all tests incl. test/evals
+bun run evals            # task-eval report
+bun run lint             # biome ci
+bun run typecheck
+bun run build            # dist/ via tsconfig.build.json
 ```
 
 ## Notes
 
-- Memory directory is `~/.claude/projects/<sanitizePath(canonicalGitRoot)>/memory/` — shared with Claude Code bidirectionally
-- `sanitizePath()` + `djb2Hash()` are exact copies from Claude Code source to guarantee byte-identical paths
-- The bash wrapper (`bin/opencode-memory`) uses `mktemp` timestamp comparison to detect if the main agent already wrote memories — if so, extraction is skipped
-- Shell hook is installed via `opencode-memory install`, which writes an `opencode()` function to `~/.zshrc` or `~/.bashrc` — shell functions take priority over PATH binaries
-- Auto-dream gate state is tracked with a per-project consolidation lock file under `~/.claude/opencode-memory/`
-- `package-lock.json` is gitignored (Bun runtime, not npm)
-
-## Notes on Claude Code alignment
-
-Core modules (`memory.ts`, `memoryScan.ts`, `recall.ts`, `prompt.ts`) are ported from Claude Code's `src/memdir/` directory:
-
-| This project | Claude Code source |
-|---|---|
-| `memoryScan.ts` | `memoryScan.ts` — recursive scan + frontmatter header parsing |
-| `recall.ts` | `findRelevantMemories.ts` — adapted for keyword scoring (no LLM side-query) |
-| `prompt.ts` | `memoryTypes.ts` + `memdir.ts` — prompt sections, type taxonomy, truncation |
-| `memory.ts` `truncateEntrypoint()` | `memdir.ts` `truncateEntrypointContent()` — uses `.length` not `Buffer.byteLength` |
-
-The `recall.ts` module uses heuristic keyword scoring instead of Claude Code's `sideQuery()` LLM selection, since the plugin environment has no equivalent capability.
+- Memory directory: `<CLAUDE_CONFIG_DIR>/projects/<sanitizePath(canonicalGitRoot)>/memory/`, shared with Claude Code. `sanitizePath` / `djb2Hash` are exact copies of Claude Code's.
+- Plugin state: `<CLAUDE_CONFIG_DIR>/opencode-memory/<same key>/extraction-state.json` (+ `autodream.lock`). A v1 `<cksum>.consolidate-lock` is migrated on first catch-up.
+- Agent names are fixed: `opencode-memory-recall`, `opencode-memory-extract`, `opencode-memory-dream`. The `config` hook merges defaults under whatever the user configured.
+- OpenCode dedupes `plugin` entries by package name across global/project config, last one wins — plugin options are not merged across files.
+- Design history for v2 lives in `docs/v2/`.
