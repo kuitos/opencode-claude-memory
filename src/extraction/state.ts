@@ -10,8 +10,11 @@ export const SESSION_STATE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 export type SessionExtractionState = {
   lastExtractedMessageID?: string
+  // Time of the last successful extraction; the fallback slice boundary and the catch-up comparison key.
   updatedAt: number
   failures: number
+  // Time of the last failed attempt, so failure counters survive pruning without touching updatedAt.
+  attemptedAt?: number
 }
 
 export type AutodreamState = {
@@ -39,6 +42,7 @@ function normaliseSession(value: unknown): SessionExtractionState | undefined {
   const failures = typeof value.failures === "number" && Number.isFinite(value.failures) ? value.failures : 0
   const state: SessionExtractionState = { updatedAt, failures }
   if (typeof value.lastExtractedMessageID === "string") state.lastExtractedMessageID = value.lastExtractedMessageID
+  if (typeof value.attemptedAt === "number" && Number.isFinite(value.attemptedAt)) state.attemptedAt = value.attemptedAt
   return state
 }
 
@@ -109,7 +113,7 @@ export class ExtractionStateStore {
   private prune(data: ExtractionStateData): void {
     const cutoff = this.now() - SESSION_STATE_TTL_MS
     for (const [id, session] of Object.entries(data.sessions)) {
-      if (session.updatedAt < cutoff) delete data.sessions[id]
+      if (Math.max(session.updatedAt, session.attemptedAt ?? 0) < cutoff) delete data.sessions[id]
     }
   }
 

@@ -70,6 +70,37 @@ describe("runForkSession", () => {
     expect(methods(calls)).toEqual(["create", "prompt", "delete"])
   })
 
+  test("treats a transport error or a model error inside the assistant message as a failed fork", async () => {
+    const transport = makeSelectorClient()
+    transport.raw.session.prompt = async (options) => {
+      transport.calls.push({ method: "prompt", options })
+      return { data: undefined, error: { name: "BadRequest", data: { message: "invalid agent" } } }
+    }
+    await expect(runForkSession({ ...base, client: transport.client })).rejects.toThrow(/BadRequest: invalid agent/)
+    expect(methods(transport.calls)).toEqual(["create", "prompt", "delete"])
+
+    const model = makeSelectorClient()
+    model.raw.session.prompt = async (options) => {
+      model.calls.push({ method: "prompt", options })
+      return {
+        data: {
+          info: { role: "assistant", error: { name: "UnknownError", data: { message: "Token refresh failed: 401" } } },
+          parts: [],
+        },
+      }
+    }
+    await expect(runForkSession({ ...base, client: model.client })).rejects.toThrow(/Token refresh failed: 401/)
+    expect(methods(model.calls)).toEqual(["create", "prompt", "delete"])
+
+    const createFailed = makeSelectorClient()
+    createFailed.raw.session.create = async (options) => {
+      createFailed.calls.push({ method: "create", options })
+      return { data: undefined, error: { name: "NotFound", data: { message: "no such directory" } } }
+    }
+    await expect(runForkSession({ ...base, client: createFailed.client })).rejects.toThrow(/session.create failed/)
+    expect(methods(createFailed.calls)).toEqual(["create"])
+  })
+
   test("throws when create returns no session id", async () => {
     const { client, calls, raw } = makeSelectorClient()
     raw.session.create = async (options) => {

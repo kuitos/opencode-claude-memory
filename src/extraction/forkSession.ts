@@ -34,6 +34,42 @@ export function extractSessionID(response: unknown): string | undefined {
   return typeof id === "string" ? id : undefined
 }
 
+function describeError(error: unknown): string {
+  if (error && typeof error === "object") {
+    const named = error as { name?: unknown; message?: unknown; data?: { message?: unknown } }
+    const message = named.data?.message ?? named.message
+    if (typeof message === "string") {
+      return typeof named.name === "string" ? `${named.name}: ${message}` : message
+    }
+    try {
+      return JSON.stringify(error)
+    } catch {
+      return String(error)
+    }
+  }
+  return String(error)
+}
+
+// The SDK client never throws (`ThrowOnError = false`): HTTP failures arrive as `{ error }` and a
+// model failure inside the fork arrives as a normal assistant message carrying `info.error`. Both
+// must count as a failed fork, otherwise the caller would advance its watermark over nothing.
+export function forkFailure(response: unknown): string | undefined {
+  if (!response || typeof response !== "object") return undefined
+  const transport = (response as { error?: unknown }).error
+  if (transport !== undefined && transport !== null) return describeError(transport)
+  const data = unwrapData<{ info?: { error?: unknown } }>(response)
+  const modelError = data && typeof data === "object" ? data.info?.error : undefined
+  if (modelError !== undefined && modelError !== null) return describeError(modelError)
+  return undefined
+}
+
+export class ForkSessionError extends Error {
+  constructor(title: string, detail: string) {
+    super(`${title}: ${detail}`)
+    this.name = "ForkSessionError"
+  }
+}
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, error: () => Error): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_, reject) => {
@@ -53,8 +89,10 @@ export async function runForkSession(input: ForkSessionInput): Promise<unknown> 
     body: { parentID: input.parentSessionID, title: input.title },
     query: { directory },
   })
+  const createFailure = forkFailure(created)
+  if (createFailure) throw new ForkSessionError(input.title, `session.create failed (${createFailure})`)
   const forkID = extractSessionID(created)
-  if (!forkID) throw new Error(`${input.title}: session.create returned no session id`)
+  if (!forkID) throw new ForkSessionError(input.title, "session.create returned no session id")
   input.onCreated?.(forkID)
 
   // `format` (structured output) is accepted by the server but missing from the v1 SDK body type.
@@ -69,7 +107,7 @@ export async function runForkSession(input: ForkSessionInput): Promise<unknown> 
 
   let timedOut = false
   try {
-    return await withTimeout(
+    const response = await withTimeout(
       client.session.prompt({ path: { id: forkID }, query: { directory }, body: body as never }),
       input.timeoutMs,
       () => {
@@ -77,6 +115,9 @@ export async function runForkSession(input: ForkSessionInput): Promise<unknown> 
         return new ForkSessionTimeoutError(input.title, input.timeoutMs)
       },
     )
+    const failure = forkFailure(response)
+    if (failure) throw new ForkSessionError(input.title, failure)
+    return response
   } finally {
     // On timeout the server is still running the fork: stop it before deleting the session so it
     // does not keep inserting parts for a row that no longer exists.

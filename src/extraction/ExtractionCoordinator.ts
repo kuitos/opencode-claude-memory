@@ -272,6 +272,7 @@ export class ExtractionCoordinator {
             data.sessions[sessionID] = {
               ...(previous ?? { updatedAt: 0 }),
               failures,
+              attemptedAt: this.now(),
             }
           })
         }

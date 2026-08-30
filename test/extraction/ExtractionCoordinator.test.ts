@@ -140,7 +140,7 @@ describe("ExtractionCoordinator incremental extraction", () => {
   })
 
   test("a timed-out fork is aborted and deleted, the watermark stays and failures count up until the cap", async () => {
-    const { coordinator, selector, conversations, state, entries } = setup()
+    const { coordinator, selector, conversations, state, entries, now } = setup()
     conversations.ses_3 = conversation("ses_3", 1)
     const never = deferred<unknown>()
     selector.raw.session.prompt = async (opts) => {
@@ -150,7 +150,8 @@ describe("ExtractionCoordinator incremental extraction", () => {
 
     for (let attempt = 1; attempt < MAX_EXTRACTION_FAILURES; attempt++) {
       await idle(coordinator, "ses_3")
-      expect(state.getSession("ses_3")).toEqual({ updatedAt: 0, failures: attempt })
+      expect(state.getSession("ses_3")).toMatchObject({ updatedAt: 0, failures: attempt })
+      expect(state.getSession("ses_3")?.attemptedAt).toBe(now())
     }
     expect(methods(selector.calls).filter((m) => m === "abort")).toHaveLength(MAX_EXTRACTION_FAILURES - 1)
     expect(methods(selector.calls).filter((m) => m === "delete")).toHaveLength(MAX_EXTRACTION_FAILURES - 1)

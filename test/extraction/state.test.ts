@@ -39,8 +39,10 @@ describe("ExtractionStateStore", () => {
     store.update((data) => {
       data.sessions.fresh = { updatedAt: now - 1000, failures: 0 }
       data.sessions.stale = { updatedAt: now - SESSION_STATE_TTL_MS - 1, failures: 0 }
+      // A session that never succeeded but failed recently keeps its failure counter.
+      data.sessions.failing = { updatedAt: 0, failures: 2, attemptedAt: now - 1000 }
     })
-    expect(Object.keys(store.read().sessions)).toEqual(["fresh"])
+    expect(Object.keys(store.read().sessions).sort()).toEqual(["failing", "fresh"])
   })
 
   test("tolerates corrupt or partial files", () => {
