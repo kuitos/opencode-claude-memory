@@ -1,664 +1,354 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtempSync, mkdirSync, rmSync } from "fs"
-import { tmpdir } from "os"
-import { join } from "path"
-import { MemoryPlugin } from "../src/index.js"
-import { saveMemory } from "../src/memory.js"
-import { getMemoryDir } from "../src/paths.js"
+import { existsSync, readFileSync } from "node:fs"
+import { join } from "node:path"
+import type { PluginInput } from "@opencode-ai/plugin"
+import { MEMORY_AGENTS } from "../src/config.js"
+import plugin, { createMemoryPlugin, MemoryOptionsSchema, MemoryPlugin, MemoryStore, PLUGIN_ID } from "../src/index.js"
+import { AUTO_MEMORY_MARKER } from "../src/prompt/systemPrompt.js"
+import type { PluginConfig } from "../src/sdk.js"
+import {
+  callOptions,
+  cleanupTempDirs,
+  deferred,
+  emit,
+  makePlugin,
+  makeSelectorClient,
+  message,
+  messagesTransform,
+  methods,
+  runTool,
+  systemTransform,
+  tempDir,
+  tempGitRepo,
+  textPart,
+  toolPart,
+  userMessage,
+} from "./helpers/index.js"
 
-const tempDirs: string[] = []
+afterEach(cleanupTempDirs)
 
-function makeTempGitRepo(): string {
-  const root = mkdtempSync(join(tmpdir(), "index-test-"))
-  mkdirSync(join(root, ".git"), { recursive: true })
-  tempDirs.push(root)
-  return root
+const DB_MEMORY = {
+  file_name: "database_rules",
+  name: "Database Test Rules",
+  description: "Rules for database integration tests",
+  type: "feedback",
+  content: "Run integration tests against a real database, not mocks.",
 }
 
-function makeTempProject(): string {
-  const root = mkdtempSync(join(tmpdir(), "index-test-project-"))
-  tempDirs.push(root)
-  return root
-}
+describe("plugin module shape", () => {
+  test("default export is a PluginModule and the named exports are the public API", () => {
+    expect(plugin).toEqual({ id: PLUGIN_ID, server: MemoryPlugin })
+    expect(typeof MemoryPlugin).toBe("function")
+    expect(typeof createMemoryPlugin).toBe("function")
+    expect(MemoryOptionsSchema.safeParse({}).success).toBe(true)
+    expect(typeof MemoryStore).toBe("function")
+  })
 
-afterEach(() => {
-  while (tempDirs.length > 0) {
-    const dir = tempDirs.pop()
-    if (dir) rmSync(dir, { recursive: true, force: true })
-  }
+  test("invalid plugin options fail at load time with the offending path", async () => {
+    await expect(makePlugin({ options: { extract: { enabled: "yes" } } })).rejects.toThrow(/extract\.enabled/)
+  })
+
+  test("legacy OPENCODE_MEMORY_* variables have no effect", async () => {
+    const worktree = tempGitRepo()
+    const claudeConfigDir = tempDir("ocm-claude-")
+    const env = {
+      CLAUDE_CONFIG_DIR: claudeConfigDir,
+      OPENCODE_MEMORY_AGENT: "memory",
+      OPENCODE_MEMORY_RECALL_AGENT: "memory",
+      OPENCODE_MEMORY_IGNORE: "1",
+      OPENCODE_MEMORY_EXTRACT: "0",
+    }
+    const hooks = await createMemoryPlugin(env)({
+      worktree,
+      directory: worktree,
+      client: undefined,
+    } as unknown as PluginInput)
+    const config: PluginConfig = {}
+    await hooks.config?.(config)
+    expect(Object.keys(config.agent ?? {}).sort()).toEqual(Object.values(MEMORY_AGENTS).sort())
+    expect(await systemTransform(hooks, "ses_env")).toContain("## MEMORY.md")
+  })
 })
 
-type MessagesTransform = (
-  input: {},
-  output: {
-    messages: Array<{
-      info: { role: string; sessionID?: string }
-      parts: Array<{ type: string; text?: string; tool?: string; state?: { status: string } }>
-    }>
-  },
-) => Promise<void>
-
-type SystemTransform = (
-  input: { model: unknown; sessionID?: string },
-  output: { system: string[] },
-) => Promise<void>
-
-type Deferred<T> = {
-  promise: Promise<T>
-  resolve(value: T): void
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>((r) => {
-    resolve = r
-  })
-  return { promise, resolve }
-}
-
-async function flushPromises(): Promise<void> {
-  await Promise.resolve()
-  await Promise.resolve()
-  await new Promise((resolve) => setTimeout(resolve, 0))
-}
-
-function makeCompletedSelectorClient(selections: string[][]) {
-  let promptCount = 0
-  let sessionCount = 0
-  return {
-    session: {
-      async create(_parameters?: unknown) {
-        sessionCount += 1
-        return { data: { id: `selector-session-${sessionCount}` } }
-      },
-      async prompt(_parameters: unknown) {
-        const selected = selections[promptCount] ?? selections.at(-1) ?? []
-        promptCount += 1
-        return {
-          data: {
-            info: {
-              structured: {
-                selected_memories: selected,
-              },
-            },
-            parts: [],
-          },
-        }
-      },
-      async delete(_parameters: unknown) {
-        return { data: true }
-      },
-    },
-  }
-}
-
-describe("MemoryPlugin system transform", () => {
-  test("uses directory as memory root when OpenCode reports root worktree", async () => {
-    const project = makeTempProject()
-    const configDir = mkdtempSync(join(tmpdir(), "index-test-claude-"))
-    tempDirs.push(configDir)
-    const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
-    process.env.CLAUDE_CONFIG_DIR = configDir
-
-    try {
-      const expectedMemoryDir = getMemoryDir(project)
-      const rootMemoryDir = getMemoryDir("/")
-      const plugin = await MemoryPlugin({ worktree: "/", directory: project } as never)
-      const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-      const output = { system: [] as string[] }
-
-      await transform({ model: "test-model", sessionID: "ses_root_worktree" }, output)
-
-      expect(output.system).toHaveLength(1)
-      expect(output.system[0]).toContain(expectedMemoryDir)
-      expect(output.system[0]).not.toContain(rootMemoryDir)
-    } finally {
-      if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
-      else process.env.CLAUDE_CONFIG_DIR = originalConfigDir
-    }
-  })
-
-  test("suppresses memory context when user explicitly asks to ignore memory", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "hidden", "Hidden Memory", "Should be ignored", "user", "Secret context")
-
-    const plugin = await MemoryPlugin({ worktree: repo } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_ignore_direct" },
-            parts: [{ type: "text", text: "Ignore memory and answer from fresh context only." }],
-          },
-        ],
-      },
-    )
-
-    const output = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_ignore_direct" }, output)
-
-    expect(output.system).toHaveLength(1)
-    expect(output.system[0]).toContain("# Auto Memory")
-    expect(output.system[0]).not.toContain("## MEMORY.md")
-    expect(output.system[0]).not.toContain("Hidden Memory")
-    expect(output.system[0]).not.toContain("## Recalled Memories")
+describe("system prompt injection", () => {
+  test("uses the directory as memory root when OpenCode reports the filesystem root as worktree", async () => {
+    const project = tempDir("ocm-project-")
+    const hooks = await makePlugin({ worktree: "/", directory: project })
+    const expected = new MemoryStore(project, { claudeConfigDir: hooks.claudeConfigDir }).memoryDir
+    const rootDir = new MemoryStore("/", { claudeConfigDir: hooks.claudeConfigDir }).memoryDir
+    const prompt = await systemTransform(hooks, "ses_root")
+    expect(prompt).toContain(expected)
+    expect(prompt).not.toContain(rootDir)
   })
 
   test("keeps memory context for normal turns", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "visible", "Visible Memory", "Should be injected", "user", "Visible context")
-
-    const plugin = await MemoryPlugin({ worktree: repo } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_normal" },
-            parts: [{ type: "text", text: "What do you remember about visible context?" }],
-          },
-        ],
-      },
-    )
-
-    const output = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_normal" }, output)
-
-    expect(output.system).toHaveLength(1)
-    expect(output.system[0]).toContain("## MEMORY.md")
-    expect(output.system[0]).toContain("Visible Memory")
+    const hooks = await makePlugin()
+    await runTool(hooks, "memory_save", { ...DB_MEMORY, name: "Visible Memory" })
+    await messagesTransform(hooks, [userMessage("What do you remember about visible context?", "ses_normal")])
+    const prompt = await systemTransform(hooks, "ses_normal")
+    expect(prompt.startsWith(AUTO_MEMORY_MARKER)).toBe(true)
+    expect(prompt).toContain("## MEMORY.md")
+    expect(prompt).toContain("Visible Memory")
   })
 
-  test("suppresses memory context when real runtime message text lives in parts", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "parts_hidden", "Parts Hidden", "Should be ignored", "user", "Parts context")
+  test("suppresses memory context for the rest of the session when the user asks to ignore memory", async () => {
+    const hooks = await makePlugin()
+    await runTool(hooks, "memory_save", { ...DB_MEMORY, name: "Hidden Memory" })
 
-    const plugin = await MemoryPlugin({ worktree: repo } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-    const output = { system: [] as string[] }
+    const stripped = await messagesTransform(hooks, [
+      message("system", [
+        textPart(`${AUTO_MEMORY_MARKER}\n# Auto Memory\n\n## MEMORY.md\n\n- [Secret](secret.md) — hidden`),
+      ]),
+      userMessage("Ignore memory and answer from fresh context only.", "ses_ignore"),
+    ])
+    expect(stripped).toHaveLength(1)
+    expect(stripped[0]?.info.role).toBe("user")
 
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_test_ignore" },
-            parts: [{ type: "text", text: "Ignore memory and answer from fresh context only." }],
-          },
-        ],
-      },
-    )
+    const first = await systemTransform(hooks, "ses_ignore")
+    expect(first).toContain("# Auto Memory")
+    expect(first).not.toContain("## MEMORY.md")
+    expect(first).not.toContain("Hidden Memory")
+    expect(first).not.toContain("## Recalled Memories")
 
-    await transform(
-      {
-        model: "test-model",
-        sessionID: "ses_test_ignore",
-      },
-      output,
-    )
+    await messagesTransform(hooks, [
+      userMessage("Ignore memory and answer from fresh context only.", "ses_ignore", { id: "m1" }),
+      userMessage("Now tell me about the hidden memory", "ses_ignore", { id: "m2" }),
+    ])
+    expect(await systemTransform(hooks, "ses_ignore")).not.toContain("## MEMORY.md")
 
-    expect(output.system).toHaveLength(1)
-    expect(output.system[0]).not.toContain("## MEMORY.md")
-    expect(output.system[0]).not.toContain("Parts Hidden")
-    expect(output.system[0]).not.toContain("## Recalled Memories")
-  })
-
-  test("removes Auto Memory system message in messages transform for ignore-memory turns", async () => {
-    const repo = makeTempGitRepo()
-    const plugin = await MemoryPlugin({ worktree: repo } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-
-    const output = {
-      messages: [
-        {
-          info: { role: "system" },
-          parts: [{ type: "text", text: "# Auto Memory\n\n## MEMORY.md\n\n- [Secret](secret.md) — hidden" }],
-        },
-        {
-          info: { role: "user", sessionID: "ses_ignore_messages" },
-          parts: [{ type: "text", text: "Ignore memory and answer from fresh context only." }],
-        },
-      ],
-    }
-
-    await messagesTransform({}, output)
-
-    expect(output.messages).toHaveLength(1)
-    expect(output.messages[0]!.info.role).toBe("user")
-  })
-
-  test("suppresses memory context when env override is set", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "env_hidden", "Env Hidden", "Should be ignored by env", "user", "Env context")
-
-    const original = process.env.OPENCODE_MEMORY_IGNORE
-    process.env.OPENCODE_MEMORY_IGNORE = "1"
-
-    try {
-      const plugin = await MemoryPlugin({ worktree: repo } as never)
-      const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-      const output = { system: [] as string[] }
-
-      await transform({ model: "test-model", sessionID: "ses_env_ignore" }, output)
-
-      expect(output.system).toHaveLength(1)
-      expect(output.system[0]).not.toContain("## MEMORY.md")
-      expect(output.system[0]).not.toContain("Env Hidden")
-      expect(output.system[0]).not.toContain("## Recalled Memories")
-    } finally {
-      if (original === undefined) delete process.env.OPENCODE_MEMORY_IGNORE
-      else process.env.OPENCODE_MEMORY_IGNORE = original
-    }
+    await emit(hooks, { type: "session.deleted", properties: { info: { id: "ses_ignore" } } })
+    expect(await systemTransform(hooks, "ses_ignore")).toContain("## MEMORY.md")
   })
 })
 
-describe("MemoryPlugin LLM recall prefetch", () => {
-  test("prefetches without failing user message transform when runtime client uses the default SDK shape", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "testing_pref_unsupported", "Testing Preference", "Database integration test guidance", "feedback", "Use real databases in integration tests.")
-    let createCalled = false
-    const client = {
-      session: {
-        async create(_parameters?: unknown) {
-          createCalled = true
-          return { data: { id: "selector-session" } }
-        },
-        async prompt(_parameters: unknown) {
-          return {
-            data: {
-              parts: [{ text: JSON.stringify({ selected_memories: ["testing_pref_unsupported.md"] }) }],
-            },
-          }
-        },
-        async delete(_parameters: unknown) {
-          return { data: true }
-        },
-      },
-    }
-
-    const plugin = await MemoryPlugin({ worktree: repo, directory: repo, client } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_unsupported_prefetch" },
-            parts: [{ type: "text", text: "How should we test database changes?" }],
-          },
-        ],
-      },
+describe("recall prefetch end to end", () => {
+  test("a single-step turn gets recalled memories in its first system prompt without any extra tick", async () => {
+    const { client, calls } = makeSelectorClient((text) =>
+      text.includes("database_rules.md") ? ["database_rules.md"] : [],
     )
-    await flushPromises()
+    const hooks = await makePlugin({ client })
+    const config: PluginConfig = {}
+    await hooks.config?.(config)
+    expect(config.agent?.[MEMORY_AGENTS.recall]).toMatchObject({ hidden: true, temperature: 0 })
 
-    const output = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_unsupported_prefetch" }, output)
-
-    expect(createCalled).toBe(true)
-    expect(output.system[0]).toContain("## MEMORY.md")
-    expect(output.system[0]).toContain("## Recalled Memories")
-    expect(output.system[0]).toContain("Testing Preference")
-  })
-
-  test("does not wait for an unfinished selector and injects completed recall on the next loop", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "testing_pref", "Testing Preference", "Database integration test guidance", "feedback", "Use real databases in integration tests.")
-
-    const promptResult = deferred<unknown>()
-    const client = {
-      session: {
-        async create(_parameters?: unknown) {
-          return { data: { id: "selector-session" } }
-        },
-        async prompt(_parameters: unknown) {
-          return promptResult.promise
-        },
-        async delete(_parameters: unknown) {
-          return { data: true }
-        },
-      },
-    }
-
-    const plugin = await MemoryPlugin({ worktree: repo, directory: repo, client } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_prefetch" },
-            parts: [{ type: "text", text: "How should we test database changes?" }],
-          },
-        ],
-      },
-    )
-
-    const first = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_prefetch" }, first)
-    expect(first.system[0]).toContain("## MEMORY.md")
-    expect(first.system[0]).not.toContain("## Recalled Memories")
-
-    promptResult.resolve({
-      data: {
-        info: {
-          structured: {
-            selected_memories: ["testing_pref.md"],
-          },
-        },
-        parts: [],
-      },
+    await runTool(hooks, "memory_save", DB_MEMORY)
+    await runTool(hooks, "memory_save", {
+      file_name: "release_notes",
+      name: "Release Notes",
+      description: "Release process checklist",
+      type: "project",
+      content: "Update the changelog before publishing.",
     })
-    await flushPromises()
 
-    const second = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_prefetch" }, second)
-    expect(second.system[0]).toContain("## Recalled Memories")
-    expect(second.system[0]).toContain("Testing Preference")
-    expect(second.system[0]).toContain("Use real databases in integration tests.")
+    await messagesTransform(hooks, [
+      userMessage("How should we test database changes?", "real-session", { id: "user-message-1" }),
+    ])
+    const prompt = await systemTransform(hooks, "real-session")
+
+    expect(methods(calls).filter((m) => m !== "list" && m !== "messages")).toEqual(["create", "prompt", "delete"])
+    const promptCall = calls.find((c) => c.method === "prompt")
+    const promptText = callOptions<{ body: { parts: Array<{ text: string }> } }>(promptCall).body.parts[0]?.text ?? ""
+    expect(promptText).toContain("Query: How should we test database changes?")
+    expect(promptText).toContain("database_rules.md")
+    expect(promptText).toContain("release_notes.md")
+
+    const recalled = prompt.split("## Recalled Memories")[1] ?? ""
+    expect(recalled).toContain("Database Test Rules")
+    expect(recalled).toContain("Run integration tests against a real database, not mocks.")
+    expect(recalled).not.toContain("Release Notes")
   })
 
-  test("starts recall prefetch for CJK queries without spaces", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "testing_pref_cjk", "Testing Preference", "Database integration test guidance", "feedback", "Use real databases in integration tests.")
+  test("a slow selector is not awaited beyond recall.waitMs and is injected on the next call", async () => {
+    const { client, raw } = makeSelectorClient()
+    const gate = deferred<unknown>()
+    raw.session.prompt = async () => {
+      await gate.promise
+      return { data: { info: { structured: { selected_memories: ["database_rules.md"] } }, parts: [] } }
+    }
+    const hooks = await makePlugin({ client, options: { recall: { waitMs: 20 } } })
+    await runTool(hooks, "memory_save", DB_MEMORY)
+    await messagesTransform(hooks, [userMessage("How should we test database changes?", "ses_slow", { id: "m1" })])
 
-    const client = makeCompletedSelectorClient([["testing_pref_cjk.md"]])
-    const plugin = await MemoryPlugin({ worktree: repo, directory: repo, client } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
+    const first = await systemTransform(hooks, "ses_slow")
+    expect(first).toContain("## MEMORY.md")
+    expect(first).not.toContain("## Recalled Memories")
 
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_prefetch_cjk" },
-            parts: [{ type: "text", text: "数据库测试怎么做" }],
-          },
-        ],
-      },
-    )
-    await flushPromises()
-
-    const output = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_prefetch_cjk" }, output)
-
-    expect(output.system[0]).toContain("## Recalled Memories")
-    expect(output.system[0]).toContain("Testing Preference")
+    gate.resolve(undefined)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const second = await systemTransform(hooks, "ses_slow")
+    expect(second).toContain("## Recalled Memories")
+    expect(second).toContain("Database Test Rules")
+    expect(await systemTransform(hooks, "ses_slow")).not.toContain("## Recalled Memories")
   })
 
-  test("does not restart selector after recall is consumed in the same user turn", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "testing_pref_once", "Testing Preference", "Database integration test guidance", "feedback", "Use real databases in integration tests.")
-    saveMemory(repo, "other_pref_once", "Other Preference", "Should not be selected by a restarted selector", "feedback", "This would indicate a duplicate selector run.")
+  test("completed tool parts are passed to the selector and already surfaced memories are not re-selected", async () => {
+    const { client, calls } = makeSelectorClient([["grep_ref.md"], ["grep_ref.md"]])
+    const hooks = await makePlugin({ client })
+    await runTool(hooks, "memory_save", {
+      file_name: "grep_ref",
+      name: "Grep Tool API",
+      description: "Usage reference for grep tool",
+      type: "reference",
+      content: "How to use grep tool",
+    })
 
-    const client = makeCompletedSelectorClient([["testing_pref_once.md"], ["other_pref_once.md"]])
-    const plugin = await MemoryPlugin({ worktree: repo, directory: repo, client } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
+    await messagesTransform(hooks, [
+      userMessage("Search the codebase", "ses_tools", { id: "m1" }),
+      message("assistant", [toolPart("grep")], { sessionID: "ses_tools" }),
+    ])
+    const first = await systemTransform(hooks, "ses_tools")
+    expect(first).toContain("### Grep Tool API (reference)")
+    const promptCall = calls.find((c) => c.method === "prompt")
+    const promptText = callOptions<{ body: { parts: Array<{ text: string }> } }>(promptCall).body.parts[0]?.text ?? ""
+    expect(promptText).toContain("Recently used tools: grep")
 
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_prefetch_once" },
-            parts: [{ type: "text", text: "How should we test database changes?" }],
-          },
-        ],
-      },
-    )
-    await flushPromises()
-
-    const first = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_prefetch_once" }, first)
-    expect(first.system[0]).toContain("Testing Preference")
-
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_prefetch_once" },
-            parts: [{ type: "text", text: "How should we test database changes?" }],
-          },
-          {
-            info: { role: "assistant" as string, sessionID: "ses_prefetch_once" },
-            parts: [{ type: "tool", tool: "grep", state: { status: "completed" } }],
-          },
-        ],
-      },
-    )
-    await flushPromises()
-
-    const second = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_prefetch_once" }, second)
-    expect(second.system[0]).not.toContain("## Recalled Memories")
-    expect(second.system[0]).not.toContain("This would indicate a duplicate selector run.")
+    await messagesTransform(hooks, [
+      message("system", [textPart(first)], { sessionID: "ses_tools" }),
+      userMessage("Tell me about grep again", "ses_tools", { id: "m2" }),
+    ])
+    const second = await systemTransform(hooks, "ses_tools")
+    expect(second).not.toContain("## Recalled Memories")
+    expect(calls.filter((c) => c.method === "prompt")).toHaveLength(1)
   })
 })
 
-describe("MemoryPlugin recentTools from message parts", () => {
-  test("filters tool-reference memories when completed tool parts exist in messages", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "grep_ref", "Grep Tool API", "Usage reference for grep tool", "reference", "How to use grep tool")
-    saveMemory(repo, "project_info", "Project Info", "General project info", "project", "Project setup details")
+describe("instance isolation", () => {
+  test("two plugin instances in one process do not share state", async () => {
+    const claudeConfigDir = tempDir("ocm-claude-")
+    const a = await makePlugin({ claudeConfigDir })
+    const b = await makePlugin({ claudeConfigDir })
 
-    const plugin = await MemoryPlugin({ worktree: repo } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
+    await messagesTransform(a, [userMessage("Ignore memory for now.", "ses_shared", { id: "m1" })])
+    expect(await systemTransform(a, "ses_shared")).not.toContain("## MEMORY.md")
+    expect(await systemTransform(b, "ses_shared")).toContain("## MEMORY.md")
 
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_tools_test" },
-            parts: [{ type: "text", text: "Search the codebase" }],
-          },
-          {
-            info: { role: "assistant" as string, sessionID: "ses_tools_test" },
-            parts: [{ type: "tool", tool: "grep", state: { status: "completed" } }],
-          },
-        ],
-      },
-    )
-
-    const output = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_tools_test" }, output)
-
-    expect(output.system[0]).toContain("Project Info")
-  })
-
-  test("does NOT filter tool-reference memories for failed tool parts", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "grep_ref2", "Grep Tool API", "Usage reference for grep tool", "reference", "How to use grep tool")
-
-    const plugin = await MemoryPlugin({ worktree: repo } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_failed_tool" },
-            parts: [{ type: "text", text: "How do I use grep?" }],
-          },
-          {
-            info: { role: "assistant" as string, sessionID: "ses_failed_tool" },
-            parts: [{ type: "tool", tool: "grep", state: { status: "error" } }],
-          },
-        ],
-      },
-    )
-
-    const output = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_failed_tool" }, output)
-
-    expect(output.system[0]).toContain("Grep Tool API")
-  })
-
-  test("tool reference filtering resets after compact (tools no longer in messages)", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "grep_ref3", "Grep Tool API", "Usage reference for grep tool", "reference", "How to use grep tool")
-
-    const client = makeCompletedSelectorClient([[], ["grep_ref3.md"]])
-    const plugin = await MemoryPlugin({ worktree: repo, directory: repo, client } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "user", sessionID: "ses_compact_tools" },
-            parts: [{ type: "text", text: "Search the code" }],
-          },
-          {
-            info: { role: "assistant" as string, sessionID: "ses_compact_tools" },
-            parts: [{ type: "tool", tool: "grep", state: { status: "completed" } }],
-          },
-        ],
-      },
-    )
-    await flushPromises()
-
-    const out1 = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_compact_tools" }, out1)
-    const recalled1 = out1.system[0]?.split("## Recalled Memories")[1] ?? ""
-    expect(recalled1).not.toContain("Grep Tool API")
-
-    await messagesTransform(
-      {},
-      {
-        messages: [
-          {
-            info: { role: "assistant" as string, sessionID: "ses_compact_tools" },
-            parts: [{ type: "text", text: "[compacted summary — no tool parts]" }],
-          },
-          {
-            info: { role: "user", sessionID: "ses_compact_tools" },
-            parts: [{ type: "text", text: "How do I use grep?" }],
-          },
-        ],
-      },
-    )
-    await flushPromises()
-
-    const out2 = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_compact_tools" }, out2)
-    expect(out2.system[0]).toContain("## Recalled Memories")
-    expect(out2.system[0]?.split("## Recalled Memories")[1]).toContain("Grep Tool API")
+    await runTool(a, "memory_save", DB_MEMORY)
+    expect((await runTool(b, "memory_list", {})).output).toBe("No memories saved yet.")
+    expect((await runTool(a, "memory_list", {})).title).toBe("1 memory")
   })
 })
 
-describe("MemoryPlugin alreadySurfaced tracking", () => {
-  test("does not re-surface same memories when system prompt already contains them", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "only_mem", "Only Memory", "The sole memory", "user", "Single memory content")
-
-    const client = makeCompletedSelectorClient([["only_mem.md"], ["only_mem.md"]])
-    const plugin = await MemoryPlugin({ worktree: repo, directory: repo, client } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-
-    await messagesTransform({}, {
-      messages: [{
-        info: { role: "user", sessionID: "ses_surfaced" },
-        parts: [{ type: "text", text: "Tell me about the only memory" }],
-      }],
+describe("config hook", () => {
+  test("merges the three hidden agents under user overrides", async () => {
+    const hooks = await makePlugin()
+    const config: PluginConfig = {
+      agent: { [MEMORY_AGENTS.recall]: { model: "anthropic/claude-haiku-4-5" }, [MEMORY_AGENTS.dream]: { steps: 5 } },
+    }
+    await hooks.config?.(config)
+    expect(config.agent?.[MEMORY_AGENTS.recall]).toMatchObject({
+      model: "anthropic/claude-haiku-4-5",
+      hidden: true,
+      mode: "all",
     })
-    await flushPromises()
+    expect(config.agent?.[MEMORY_AGENTS.recall]?.prompt).toBeTruthy()
+    expect(config.agent?.[MEMORY_AGENTS.extract]).toMatchObject({ hidden: true, steps: 30 })
+    expect(config.agent?.[MEMORY_AGENTS.dream]).toMatchObject({ hidden: true, steps: 5 })
+  })
+})
 
-    const output1 = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_surfaced" }, output1)
-    expect(output1.system[0]).toContain("## Recalled Memories")
-    expect(output1.system[0]).toContain("Only Memory")
+describe("extraction end to end", () => {
+  test("session.idle extracts through a sandboxed fork whose memory_save calls carry the done-signal (#35)", async () => {
+    const { client, raw, calls } = makeSelectorClient()
+    raw.session.messages = async (options) => {
+      calls.push({ method: "messages", options })
+      return {
+        data: [
+          {
+            info: { id: "u1", role: "user", time: { created: 1 } },
+            parts: [
+              {
+                type: "text",
+                text: "I am a backend engineer on the API team; always run integration tests against a real database.",
+              },
+            ],
+          },
+        ],
+      }
+    }
+    let hooksRef: Awaited<ReturnType<typeof makePlugin>> | undefined
+    const forkResults: string[] = []
+    const userRole = {
+      file_name: "user_role",
+      name: "User Role",
+      description: "Backend engineer on the API team",
+      type: "user",
+      content: "The user is a backend engineer who owns the API service.",
+    }
+    const testing = {
+      file_name: "feedback_tests",
+      name: "Run real tests",
+      description: "Prefers integration tests",
+      type: "feedback",
+      content: "Run integration tests against a real database.",
+    }
+    raw.session.prompt = async (options) => {
+      calls.push({ method: "prompt", options })
+      const ctx = { sessionID: "selector-session-1" }
+      if (!hooksRef) throw new Error("plugin not ready")
+      forkResults.push((await runTool(hooksRef, "memory_save", userRole, ctx)).output)
+      forkResults.push((await runTool(hooksRef, "memory_save", userRole, ctx)).output)
+      forkResults.push((await runTool(hooksRef, "memory_save", testing, ctx)).output)
+      forkResults.push(
+        (
+          await runTool(
+            hooksRef,
+            "memory_save",
+            { ...userRole, content: `${userRole.content} They also maintain the CLI.` },
+            ctx,
+          )
+        ).output,
+      )
+      return { data: { info: {}, parts: [] } }
+    }
 
-    await messagesTransform({}, {
-      messages: [
-        {
-          info: { role: "system", sessionID: "ses_surfaced" },
-          parts: [{ type: "text", text: output1.system[0] }],
-        },
-        {
-          info: { role: "user", sessionID: "ses_surfaced" },
-          parts: [{ type: "text", text: "Tell me about the only memory again" }],
-        },
-      ],
-    })
-    await flushPromises()
+    const hooks = await makePlugin({ client, options: { extract: { debounceMs: 0 }, autodream: { enabled: false } } })
+    hooksRef = hooks
+    await hooks.config?.({})
+    await emit(hooks, { type: "session.idle", properties: { sessionID: "parent-session" } })
+    await new Promise((resolve) => setTimeout(resolve, 30))
 
-    const output2 = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_surfaced" }, output2)
-    expect(output2.system[0]).not.toContain("## Recalled Memories")
+    expect(methods(calls).filter((m) => m !== "list")).toEqual(["messages", "create", "prompt", "delete"])
+    const body = callOptions<{ body: Record<string, unknown> }>(calls.find((c) => c.method === "prompt")).body
+    expect(body.agent).toBe(MEMORY_AGENTS.extract)
+    expect(body.tools).toEqual({ "*": false, memory_save: true, memory_list: true, memory_read: true })
+    expect(String(body.system)).toContain("## Existing memories")
+
+    expect(forkResults[0]).toContain("Saved so far in this extraction run (1): user_role.md")
+    expect(forkResults[1]).toStartWith('Skipped: "user_role.md" was already saved earlier in this extraction run')
+    expect(forkResults[2]).toContain("Saved so far in this extraction run (2): user_role.md, feedback_tests.md")
+    expect(forkResults[3]).toStartWith('Updated "user_role.md" (first saved earlier in this extraction run)')
+
+    const store = new MemoryStore(hooks.worktree, { claudeConfigDir: hooks.claudeConfigDir })
+    expect(store.read("user_role")?.body).toBe(`${userRole.content} They also maintain the CLI.`)
+    expect(store.readIndex().trim().split("\n")).toHaveLength(2)
+
+    const stateFile = join(store.stateDir, "extraction-state.json")
+    expect(existsSync(stateFile)).toBe(true)
+    expect(JSON.parse(readFileSync(stateFile, "utf-8")).sessions["parent-session"].lastExtractedMessageID).toBe("u1")
+
+    // Outside the fork memory_save keeps its plain result.
+    const interactive = await runTool(hooks, "memory_save", testing, { sessionID: "some-other-session" })
+    expect(interactive.output).toStartWith('Skipped: "feedback_tests.md" already exists with identical content')
+    expect(interactive.output).not.toContain("Saved so far in this extraction run")
   })
 
-  test("re-surfaces memories after compact removes them from messages", async () => {
-    const repo = makeTempGitRepo()
-    saveMemory(repo, "resurface_mem", "Resurface Memory", "Memory that should resurface after compact", "user", "Important context")
-
-    const plugin = await MemoryPlugin({ worktree: repo } as never)
-    const messagesTransform = plugin["experimental.chat.messages.transform"] as unknown as MessagesTransform
-    const transform = plugin["experimental.chat.system.transform"] as unknown as SystemTransform
-
-    await messagesTransform({}, {
-      messages: [{
-        info: { role: "user", sessionID: "ses_compact" },
-        parts: [{ type: "text", text: "Tell me about important context" }],
-      }],
-    })
-
-    const output1 = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_compact" }, output1)
-    expect(output1.system[0]).toContain("Resurface Memory")
-
-    await messagesTransform({}, {
-      messages: [
+  test("the fork's own events and transforms are ignored while it is owned", async () => {
+    const { client, raw } = makeSelectorClient()
+    raw.session.messages = async () => ({
+      data: [
         {
-          info: { role: "system", sessionID: "ses_compact" },
-          parts: [{ type: "text", text: output1.system[0] }],
-        },
-        {
-          info: { role: "user", sessionID: "ses_compact" },
-          parts: [{ type: "text", text: "Tell me again" }],
+          info: { id: "u1", role: "user", time: { created: 1 } },
+          parts: [{ type: "text", text: "Remember that PostgreSQL is my preferred database." }],
         },
       ],
     })
+    const hooks = await makePlugin({ client, options: { extract: { debounceMs: 0 }, autodream: { enabled: false } } })
+    await hooks.config?.({})
+    await emit(hooks, { type: "session.idle", properties: { sessionID: "parent" } })
+    await new Promise((resolve) => setTimeout(resolve, 30))
 
-    const outBefore = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_compact" }, outBefore)
-    expect(outBefore.system[0]).not.toContain("## Recalled Memories")
-
-    await messagesTransform({}, {
-      messages: [
-        {
-          info: { role: "assistant" as string, sessionID: "ses_compact" },
-          parts: [{ type: "text", text: "[compacted summary — old system prompts gone]" }],
-        },
-        {
-          info: { role: "user", sessionID: "ses_compact" },
-          parts: [{ type: "text", text: "Tell me about important context" }],
-        },
-      ],
-    })
-
-    const output2 = { system: [] as string[] }
-    await transform({ model: "test-model", sessionID: "ses_compact" }, output2)
-    expect(output2.system[0]).toContain("Resurface Memory")
+    expect(await systemTransform(hooks, "selector-session-1")).toBe("")
+    const output = await messagesTransform(hooks, [userMessage("Ignore memory.", "selector-session-1")])
+    expect(output).toHaveLength(1)
   })
 })
