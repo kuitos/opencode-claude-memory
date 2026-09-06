@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { readFileSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import {
   buildConversationForExtraction,
   EXTRACTION_TITLE,
@@ -588,7 +589,7 @@ describe("ExtractionCoordinator v1 migration (review F11)", () => {
   test("warns once on start-up when the v1 shell hook is still installed, without touching the file", async () => {
     const store = makeStore()
     const home = tempDir("ocm-home-")
-    const rc = `${home}/.zshrc`
+    const rc = join(home, ".zshrc")
     const original = `export PATH=$PATH:/x\n# >>> opencode-memory auto-initialization >>>\nalias opencode=opencode-memory\n# <<< opencode-memory auto-initialization <<<\n`
     writeFileSync(rc, original)
     const config = makeConfig({ extract: { catchUpLimit: 0 } }, store.claudeConfigDir, home)
