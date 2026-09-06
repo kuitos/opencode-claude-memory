@@ -76,8 +76,8 @@ v1 导出了大量内部函数（`saveMemory`、`listMemories`、`scanMemoryFile
 opencode-memory uninstall          # 在升级之前执行；或手动删除 rc 文件里
                                    # ">>> opencode-memory auto-initialization >>>" 到 "<<<" 之间的段落
 
-# 2. 升级
-npm install -g opencode-claude-memory@2
+# 2. 卸载 v1 全局包（v2 不再需要全局安装；升级方式见第 4 步的 "@2"）
+npm uninstall -g opencode-claude-memory
 
 # 3. 从 shell 配置里删除所有 OPENCODE_MEMORY_* 变量
 grep -n OPENCODE_MEMORY ~/.zshrc ~/.bashrc ~/.zshenv ~/.profile 2>/dev/null
@@ -85,9 +85,10 @@ grep -n OPENCODE_MEMORY ~/.zshrc ~/.bashrc ~/.zshenv ~/.profile 2>/dev/null
 
 ```jsonc
 // 4. 把原来的 env 配置搬到 opencode.json（全局：~/.config/opencode/opencode.json）
+//    包名必须带 "@2"：OpenCode 按 specifier 缓存 npm 插件，裸写包名会一直命中之前装好的 v1
 {
   "plugin": [
-    ["opencode-claude-memory", {
+    ["opencode-claude-memory@2", {
       "extract":   { "enabled": true },
       "autodream": { "minHours": 24, "minSessions": 5 }
     }]
