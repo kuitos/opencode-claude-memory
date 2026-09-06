@@ -9,11 +9,14 @@ export class TimeoutError extends Error {
   }
 }
 
+// The deadline timer is deliberately *not* unref'd: it is cleared as soon as the call settles, and
+// an unref'd timer is the only thing that has to fire when a request hangs. On Windows, Bun's event
+// loop does not wake up for unref'd timers while nothing else is pending (observed on CI), so an
+// unref'd deadline would never expire exactly when it is needed.
 export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, error: () => Error): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(error()), timeoutMs)
-    timer.unref?.()
   })
   return Promise.race([promise, timeout]).finally(() => {
     if (timer) clearTimeout(timer)
