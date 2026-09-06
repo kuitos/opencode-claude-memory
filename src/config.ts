@@ -56,6 +56,8 @@ export type MemoryAgents = typeof MEMORY_AGENTS
 
 export type MemoryConfig = MemoryOptions & {
   claudeConfigDir: string
+  // The user's home directory: where v1's shell hook would be installed (read-only detection).
+  homeDir: string
   agents: MemoryAgents
 }
 
@@ -87,10 +89,15 @@ export function parseMemoryOptions(options: unknown): MemoryOptions {
   return result.data
 }
 
-export function parseConfig(options: unknown, env: NodeJS.ProcessEnv = process.env): MemoryConfig {
+export function parseConfig(
+  options: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = homedir(),
+): MemoryConfig {
   return {
     ...parseMemoryOptions(options),
     claudeConfigDir: resolveClaudeConfigDir(env),
+    homeDir,
     agents: MEMORY_AGENTS,
   }
 }

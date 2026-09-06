@@ -2,15 +2,22 @@
 // <CLAUDE_CONFIG_DIR>/opencode-memory/<sanitizePath(canonicalRoot)>/extraction-state.json
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
+import { withFileLock } from "../util/exclusiveFile.js"
 
 export const EXTRACTION_STATE_VERSION = 1
 export const EXTRACTION_STATE_FILE = "extraction-state.json"
 export const MAINTENANCE_LOCK_FILE = "maintenance.lock"
+export const STATE_LOCK_FILE = "extraction-state.lock"
 export const SESSION_STATE_TTL_MS = 30 * 24 * 60 * 60 * 1000
 
 export type SessionExtractionState = {
   lastExtractedMessageID?: string
-  // Time of the last successful extraction; the fallback slice boundary and the catch-up comparison key.
+  // `time.created` of the watermark message: the message boundary the watermark stands for. This is
+  // what catch-up compares against `session.time.updated` and what the fallback slice uses when the
+  // watermark message itself is gone. Never confuse it with `updatedAt` (when the fork finished):
+  // messages can arrive while a fork runs, so the two can differ by minutes.
+  lastMessageAt?: number
+  // Time of the last successful extraction (pruning / TTL only).
   updatedAt: number
   failures: number
   // Time of the last failed attempt, so failure counters survive pruning without touching updatedAt.
@@ -42,6 +49,8 @@ function normaliseSession(value: unknown): SessionExtractionState | undefined {
   const failures = typeof value.failures === "number" && Number.isFinite(value.failures) ? value.failures : 0
   const state: SessionExtractionState = { updatedAt, failures }
   if (typeof value.lastExtractedMessageID === "string") state.lastExtractedMessageID = value.lastExtractedMessageID
+  if (typeof value.lastMessageAt === "number" && Number.isFinite(value.lastMessageAt))
+    state.lastMessageAt = value.lastMessageAt
   if (typeof value.attemptedAt === "number" && Number.isFinite(value.attemptedAt)) state.attemptedAt = value.attemptedAt
   return state
 }
@@ -73,11 +82,13 @@ export function parseExtractionState(raw: string): ExtractionStateData {
   return data
 }
 
-// Always re-reads the file: several OpenCode processes may maintain the same project (#30), so an
-// in-memory copy would silently overwrite their updates. The file is tiny and writes are rare.
+// Never cached: several OpenCode processes may maintain the same project (#30). Every `update()` is a
+// read-modify-write under a short cross-process file lock, so two processes committing different
+// sessions at the same time cannot overwrite each other. The file is tiny and writes are rare.
 export class ExtractionStateStore {
   readonly filePath: string
   readonly lockPath: string
+  readonly stateLockPath: string
 
   constructor(
     readonly stateDir: string,
@@ -85,6 +96,7 @@ export class ExtractionStateStore {
   ) {
     this.filePath = join(stateDir, EXTRACTION_STATE_FILE)
     this.lockPath = join(stateDir, MAINTENANCE_LOCK_FILE)
+    this.stateLockPath = join(stateDir, STATE_LOCK_FILE)
   }
 
   read(): ExtractionStateData {
@@ -101,12 +113,17 @@ export class ExtractionStateStore {
     return this.read().sessions[sessionID]
   }
 
+  // `mutate` sees the on-disk state as of this moment (under the lock), so it can make decisions
+  // against what other processes committed, not against a snapshot taken earlier.
   update(mutate: (data: ExtractionStateData) => void): ExtractionStateData {
-    const data = this.read()
-    mutate(data)
-    this.prune(data)
-    this.write(data)
-    return data
+    mkdirSync(this.stateDir, { recursive: true })
+    return withFileLock(this.stateLockPath, () => {
+      const data = this.read()
+      mutate(data)
+      this.prune(data)
+      this.write(data)
+      return data
+    })
   }
 
   private prune(data: ExtractionStateData): void {

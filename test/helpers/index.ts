@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Hooks, PluginInput, ToolContext, ToolResult } from "@opencode-ai/plugin"
@@ -26,6 +26,25 @@ export function tempGitRepo(prefix = "ocm-repo-"): string {
   return dir
 }
 
+// Windows only allows symbolic links for administrators / developer mode; the link tests skip
+// themselves elsewhere instead of failing the whole run.
+let symlinkSupport: boolean | undefined
+export function canSymlink(): boolean {
+  if (symlinkSupport === undefined) {
+    const dir = mkdtempSync(join(tmpdir(), "ocm-symlink-probe-"))
+    try {
+      writeFileSync(join(dir, "target"), "")
+      symlinkSync(join(dir, "target"), join(dir, "link"), "file")
+      symlinkSupport = true
+    } catch {
+      symlinkSupport = false
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+  return symlinkSupport
+}
+
 export function cleanupTempDirs(): void {
   while (tempDirs.length > 0) {
     const dir = tempDirs.pop()
@@ -35,8 +54,13 @@ export function cleanupTempDirs(): void {
 
 // ─── config / store ──────────────────────────────────────────────────────────
 
-export function makeConfig(options: unknown = {}, claudeConfigDir = tempDir("ocm-claude-")): MemoryConfig {
-  return parseConfig(options, { CLAUDE_CONFIG_DIR: claudeConfigDir })
+// A private home directory per config so the v1 shell-hook detection never reads the real one.
+export function makeConfig(
+  options: unknown = {},
+  claudeConfigDir = tempDir("ocm-claude-"),
+  homeDir = tempDir("ocm-home-"),
+): MemoryConfig {
+  return parseConfig(options, { CLAUDE_CONFIG_DIR: claudeConfigDir }, homeDir)
 }
 
 export function makeStore(root: string = tempGitRepo(), claudeConfigDir = tempDir("ocm-claude-")): MemoryStore {
@@ -111,14 +135,17 @@ export function toolPart(
   return { type: "tool", tool, state: { status, output } } as unknown as MessagePart
 }
 
+// Assistant messages are complete by default (`time.completed` set), matching what the server
+// reports once a turn has finished; pass `time: { created }` alone to model one still streaming.
 export function message(
   role: "user" | "assistant" | "system",
   parts: MessagePart[],
   info: Record<string, unknown> = {},
 ): ChatMessage {
   messageSeq += 1
+  const time = role === "assistant" ? { created: messageSeq, completed: messageSeq } : { created: messageSeq }
   return {
-    info: { id: `msg_${messageSeq}`, role, time: { created: messageSeq }, ...info },
+    info: { id: `msg_${messageSeq}`, role, time, ...info },
     parts,
   } as unknown as ChatMessage
 }
@@ -233,6 +260,7 @@ export type PluginTestInput = {
   client?: unknown
   options?: unknown
   claudeConfigDir?: string
+  homeDir?: string
 }
 
 export async function makePlugin(
@@ -240,7 +268,7 @@ export async function makePlugin(
 ): Promise<Hooks & { claudeConfigDir: string; worktree: string }> {
   const worktree = input.worktree ?? tempGitRepo()
   const claudeConfigDir = input.claudeConfigDir ?? tempDir("ocm-claude-")
-  const plugin = createMemoryPlugin({ CLAUDE_CONFIG_DIR: claudeConfigDir })
+  const plugin = createMemoryPlugin({ CLAUDE_CONFIG_DIR: claudeConfigDir }, input.homeDir ?? tempDir("ocm-home-"))
   const hooks = await plugin(
     {
       worktree,

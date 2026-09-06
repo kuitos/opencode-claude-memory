@@ -215,14 +215,72 @@ describe("RecallCoordinator lifecycle", () => {
     expect(recall.trackedSessions).toBe(0)
   })
 
-  test("stale sessions are evicted after the TTL", () => {
+  test("stale turn caches are evicted after the TTL, but an ignored session keeps its instruction", () => {
     let now = 1_000_000
     const store = makeStore()
     const recall = new RecallCoordinator(makeDeps({ store, now: () => now }))
-    recall.onMessagesTransform({ messages: [userMessage("Ignore memory.", "ses_old", { id: "m1" })] })
+    recall.onMessagesTransform({ messages: [userMessage("hello there", "ses_plain", { id: "m1" })] })
+    recall.onMessagesTransform({ messages: [userMessage("Ignore memory.", "ses_ignored", { id: "m1" })] })
+    expect(recall.trackedSessions).toBe(2)
     now += SESSION_STATE_TTL_MS + 1
     recall.onMessagesTransform({ messages: [userMessage("hello there", "ses_new", { id: "m1" })] })
-    expect(recall.trackedSessions).toBe(1)
-    expect(recall.isIgnored("ses_old")).toBe(false)
+    // the plain session's cache is gone; the ignored one is kept because the user asked for it
+    expect(recall.trackedSessions).toBe(2)
+    expect(recall.isIgnored("ses_ignored")).toBe(true)
+    expect(recall.isIgnored("ses_plain")).toBe(false)
+  })
+
+  test("an ignore instruction keeps applying to the same session after the TTL without a resume", async () => {
+    let now = 1_000_000
+    const { recall } = setup()
+    const first = userMessage("Ignore memory for this session.", "ses_ttl", { id: "m1" })
+    const deps = new RecallCoordinator(makeDeps({ store: makeStore(), now: () => now }))
+    deps.onMessagesTransform({ messages: [first] })
+    expect(deps.isIgnored("ses_ttl")).toBe(true)
+    now += SESSION_STATE_TTL_MS + 1
+    deps.onMessagesTransform({
+      messages: [first, userMessage("Continue with the deployment work.", "ses_ttl", { id: "m2" })],
+    })
+    expect(deps.isIgnored("ses_ttl")).toBe(true)
+    expect(await deps.takeRecalled("ses_ttl")).toEqual([])
+    void recall
+  })
+
+  test("a session first seen mid-conversation derives the ignore state from its history", () => {
+    const { recall } = setup()
+    // e.g. after a process restart: the coordinator never saw the earlier "ignore memory" turn
+    recall.onMessagesTransform({
+      messages: [
+        userMessage("Please ignore memory from now on.", "ses_hist", { id: "m1" }),
+        userMessage("What did we decide about the database?", "ses_hist", { id: "m2" }),
+      ],
+    })
+    expect(recall.isIgnored("ses_hist")).toBe(true)
+
+    const resumed = setup().recall
+    resumed.onMessagesTransform({
+      messages: [
+        userMessage("Please ignore memory from now on.", "ses_res", { id: "m1" }),
+        userMessage("OK, use memory again.", "ses_res", { id: "m2" }),
+        userMessage("What did we decide about the database?", "ses_res", { id: "m3" }),
+      ],
+    })
+    expect(resumed.isIgnored("ses_res")).toBe(false)
+  })
+})
+
+describe("RecallCoordinator query eligibility", () => {
+  test("a CJK query without whitespace still triggers the selector prefetch", async () => {
+    const { recall, selector } = setup({ selections: [["testing_pref.md"]] })
+    recall.onMessagesTransform({ messages: [userMessage("数据库测试应该怎么做", "ses_cjk", { id: "m1" })] })
+    expect((await recall.takeRecalled("ses_cjk")).map((m) => m.name)).toEqual(["Testing Preference"])
+    expect(methods(selector.calls)).toContain("prompt")
+  })
+
+  test("a single short token does not start a selector fork", async () => {
+    const { recall, selector } = setup()
+    recall.onMessagesTransform({ messages: [userMessage("hi", "ses_short", { id: "m1" })] })
+    expect(await recall.takeRecalled("ses_short")).toEqual([])
+    expect(methods(selector.calls)).not.toContain("prompt")
   })
 })

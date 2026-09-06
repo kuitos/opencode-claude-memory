@@ -65,12 +65,14 @@ export class AutoDream {
     }
 
     const { client, config, directory, owned, agents, state, log } = this.deps
-    const autodream = state.read().autodream
-    log("info", "Auto-dream consolidation starting", {
-      sessionsSince: autodream.sessionsSince.length,
-      lastConsolidatedAt: autodream.lastConsolidatedAt,
-    })
     try {
+      // Re-check under the lock: another process may have consolidated while we waited to acquire.
+      if (!this.shouldRun()) return false
+      const autodream = state.read().autodream
+      log("info", "Auto-dream consolidation starting", {
+        sessionsSince: autodream.sessionsSince.length,
+        lastConsolidatedAt: autodream.lastConsolidatedAt,
+      })
       await runForkSession({
         client,
         directory,
@@ -83,6 +85,12 @@ export class AutoDream {
         timeoutMs: config.autodream.timeoutMs,
         onCreated: (id) => owned.add(id),
         onFinished: (id) => owned.release(id, AUTODREAM_FORK_GRACE_MS),
+        onCleanupFailed: (id, stage, error) =>
+          log("warn", "Auto-dream fork cleanup failed; the server may still hold the fork session", {
+            forkID: id,
+            stage,
+            error: getErrorMessage(error),
+          }),
       })
       state.update((data) => {
         data.autodream.lastConsolidatedAt = this.now()

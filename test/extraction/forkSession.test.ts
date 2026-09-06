@@ -129,3 +129,96 @@ describe("extractSessionID", () => {
     expect(extractSessionID(undefined)).toBeUndefined()
   })
 })
+
+describe("runForkSession stage deadlines (review F5)", () => {
+  const hang = () => new Promise<never>(() => {})
+
+  test("a hung session.create is abandoned after its own deadline and onFinished is not needed", async () => {
+    const { client, raw, calls } = makeSelectorClient()
+    let signal: AbortSignal | undefined
+    raw.session.create = async (options) => {
+      calls.push({ method: "create", options })
+      signal = (options as { signal?: AbortSignal }).signal
+      return hang()
+    }
+    const finished: string[] = []
+    await expect(
+      runForkSession({ ...base, client, createTimeoutMs: 20, onFinished: (id) => finished.push(id) }),
+    ).rejects.toThrow(/session\.create timed out/)
+    expect(methods(calls)).toEqual(["create"])
+    expect(signal?.aborted).toBe(true)
+    expect(finished).toEqual([])
+  })
+
+  test("a hung abort after a prompt timeout does not block delete or onFinished", async () => {
+    const { client, raw, calls } = makeSelectorClient()
+    raw.session.prompt = async (options) => {
+      calls.push({ method: "prompt", options })
+      return hang()
+    }
+    raw.session.abort = async (options) => {
+      calls.push({ method: "abort", options })
+      return hang()
+    }
+    const finished: string[] = []
+    const cleanupFailures: string[] = []
+    const started = Date.now()
+    await expect(
+      runForkSession({
+        ...base,
+        client,
+        timeoutMs: 20,
+        cleanupTimeoutMs: 20,
+        onFinished: (id) => finished.push(id),
+        onCleanupFailed: (id, stage, error) => cleanupFailures.push(`${id}:${stage}:${(error as Error).name}`),
+      }),
+    ).rejects.toBeInstanceOf(ForkSessionTimeoutError)
+    expect(Date.now() - started).toBeLessThan(500)
+    expect(methods(calls)).toEqual(["create", "prompt", "abort", "delete"])
+    expect(finished).toEqual(["selector-session-1"])
+    expect(cleanupFailures).toEqual(["selector-session-1:abort:TimeoutError"])
+  })
+
+  test("a hung delete after a successful prompt still returns the response and fires onFinished", async () => {
+    const { client, raw, calls } = makeSelectorClient()
+    let signal: AbortSignal | undefined
+    raw.session.delete = async (options) => {
+      calls.push({ method: "delete", options })
+      signal = (options as { signal?: AbortSignal }).signal
+      return hang()
+    }
+    const finished: string[] = []
+    const cleanupFailures: string[] = []
+    const response = await runForkSession({
+      ...base,
+      client,
+      cleanupTimeoutMs: 20,
+      onFinished: (id) => finished.push(id),
+      onCleanupFailed: (id, stage) => cleanupFailures.push(`${id}:${stage}`),
+    })
+    expect(response).toMatchObject({ data: { parts: [] } })
+    expect(finished).toEqual(["selector-session-1"])
+    expect(cleanupFailures).toEqual(["selector-session-1:delete"])
+    expect(signal?.aborted).toBe(true)
+  })
+
+  test("passes an AbortSignal to every stage and aborts the prompt's on timeout", async () => {
+    const { client, raw, calls } = makeSelectorClient()
+    const signals: Record<string, AbortSignal | undefined> = {}
+    for (const stage of ["create", "prompt", "abort", "delete"] as const) {
+      const original = raw.session[stage]
+      raw.session[stage] = async (options) => {
+        signals[stage] = (options as { signal?: AbortSignal }).signal
+        if (stage === "prompt") {
+          calls.push({ method: "prompt", options })
+          return hang()
+        }
+        return original(options)
+      }
+    }
+    await expect(runForkSession({ ...base, client, timeoutMs: 20 })).rejects.toBeInstanceOf(ForkSessionTimeoutError)
+    expect(Object.keys(signals).sort()).toEqual(["abort", "create", "delete", "prompt"])
+    expect(signals.prompt?.aborted).toBe(true)
+    expect(signals.delete?.aborted).toBe(false)
+  })
+})

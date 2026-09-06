@@ -1,8 +1,19 @@
 // Per-session recall state: which memories were already surfaced, whether the user asked to ignore
 // memory, and the in-flight selector prefetch for the current turn. One instance per plugin instance.
+//
+// Two kinds of state live here with different lifetimes: the turn cache (prefetch, turn id) is
+// evicted after SESSION_STATE_TTL_MS so a long-running `serve` does not leak; the user's
+// "ignore memory" instruction is a session preference and lasts until `session.deleted` or an
+// explicit resume. Eviction never clears it, and a session seen for the first time derives it
+// from the conversation history so a restart does not silently bring memory back.
 import type { AgentRegistry } from "../agents.js"
 import type { MemoryConfig } from "../config.js"
-import { detectIgnoreMemory, detectResumeMemory, stripAutoMemoryParts } from "../hooks/ignore.js"
+import {
+  deriveIgnoredFromHistory,
+  detectIgnoreMemory,
+  detectResumeMemory,
+  stripAutoMemoryParts,
+} from "../hooks/ignore.js"
 import { buildTurnID, collectSurfacedMemoryKeys, extractRecentTools, getLastUserQuery } from "../hooks/messages.js"
 import type { ChatMessage, OpencodeClient, PluginEvent } from "../sdk.js"
 import type { MemoryStore } from "../store/MemoryStore.js"
@@ -69,7 +80,10 @@ export class RecallCoordinator {
 
     const now = this.now()
     this.evictStale(now)
-    const state = this.sessions.get(sessionID) ?? { updatedAt: now, ignored: false }
+    const state = this.sessions.get(sessionID) ?? {
+      updatedAt: now,
+      ignored: deriveIgnoredFromHistory(output.messages),
+    }
     state.updatedAt = now
 
     const turnID = buildTurnID(sessionID, turn)
@@ -126,10 +140,18 @@ export class RecallCoordinator {
     })
   }
 
+  // Drops the turn cache of sessions idle for longer than the TTL. An ignored session keeps its
+  // entry (only the cache is cleared) so the instruction survives until the session is deleted.
   private evictStale(now: number): void {
     const cutoff = now - SESSION_STATE_TTL_MS
     for (const [id, state] of this.sessions) {
-      if (state.updatedAt < cutoff) this.sessions.delete(id)
+      if (state.updatedAt >= cutoff) continue
+      if (state.ignored) {
+        state.prefetch = undefined
+        state.turnID = undefined
+      } else {
+        this.sessions.delete(id)
+      }
     }
   }
 

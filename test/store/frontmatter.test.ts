@@ -75,3 +75,15 @@ describe("buildFrontmatter / parseMemoryType", () => {
     expect(parseMemoryType("")).toBeUndefined()
   })
 })
+
+describe("leading blank lines (review F10)", () => {
+  test("header and full parser agree when the frontmatter follows blank lines", () => {
+    const raw = `${"\n".repeat(29)}---\nname: Actual name\ntype: project\n---\nBody`
+    const head = parseFrontmatterHeader(raw)
+    const full = parseFrontmatter(raw)
+    expect(head.hasFrontmatter).toBe(true)
+    expect(full.hasFrontmatter).toBe(true)
+    expect(head.frontmatter).toEqual(full.frontmatter)
+    expect(full.body).toBe("Body")
+  })
+})

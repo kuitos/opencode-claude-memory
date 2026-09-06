@@ -129,6 +129,7 @@ v2 removes the shell wrapper and every environment variable. Memory files are un
 ```bash
 # 1. remove the v1 shell hook (before or after upgrading)
 opencode-memory uninstall     # or delete the ">>> opencode-memory auto-initialization >>>" block from your rc file
+                              # (v2 logs a warning on start-up while that block is still there)
 
 # 2. upgrade
 npm install -g opencode-claude-memory@2

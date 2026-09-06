@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, writeFileSync } from "node:fs"
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs"
 import { join, resolve, sep } from "node:path"
 import {
   findCanonicalGitRoot,
@@ -9,7 +9,7 @@ import {
   sanitizePath,
   validateMemoryFileName,
 } from "../../src/store/paths.js"
-import { cleanupTempDirs, tempDir, tempGitRepo } from "../helpers/index.js"
+import { canSymlink, cleanupTempDirs, tempDir, tempGitRepo } from "../helpers/index.js"
 
 afterEach(cleanupTempDirs)
 
@@ -132,5 +132,46 @@ describe("resolveMemoryRoot", () => {
     expect(resolveMemoryRoot("/", "/home/me/project")).toBe("/home/me/project")
     expect(resolveMemoryRoot("/home/me/repo", "/home/me/repo/sub")).toBe("/home/me/repo")
     expect(resolveMemoryRoot("/", "/")).toBe("/")
+  })
+})
+
+describe("resolveMemoryFilePath symbolic links (review F6)", () => {
+  test.skipIf(!canSymlink())(
+    "refuses a directory link that leaves the memory directory, for existing and new files",
+    () => {
+      const memoryDir = join(tempDir("memory-"), "memory")
+      const outside = tempDir("outside-")
+      mkdirSync(memoryDir, { recursive: true })
+      writeFileSync(join(outside, "victim.md"), "outside")
+      symlinkSync(outside, join(memoryDir, "team"), "dir")
+
+      expect(() => resolveMemoryFilePath(memoryDir, "team/victim")).toThrow(/outside the memory directory/)
+      expect(() => resolveMemoryFilePath(memoryDir, "team/new")).toThrow(/outside the memory directory/)
+      expect(() => resolveMemoryFilePath(memoryDir, "team/deeper/new")).toThrow(/outside the memory directory/)
+    },
+  )
+
+  test.skipIf(!canSymlink())("refuses a file link and a dangling link, but accepts links that stay inside", () => {
+    const memoryDir = join(tempDir("memory-"), "memory")
+    const outside = tempDir("outside-")
+    mkdirSync(join(memoryDir, "real"), { recursive: true })
+    writeFileSync(join(outside, "secret.md"), "outside")
+    writeFileSync(join(memoryDir, "real", "inside.md"), "inside")
+    symlinkSync(join(outside, "secret.md"), join(memoryDir, "leak.md"), "file")
+    symlinkSync(join(outside, "missing.md"), join(memoryDir, "dangling.md"), "file")
+    symlinkSync(join(memoryDir, "real"), join(memoryDir, "alias"), "dir")
+
+    expect(() => resolveMemoryFilePath(memoryDir, "leak")).toThrow(/outside the memory directory/)
+    expect(() => resolveMemoryFilePath(memoryDir, "dangling")).toThrow(/outside the memory directory/)
+    expect(resolveMemoryFilePath(memoryDir, "alias/inside").relativePath).toBe("alias/inside.md")
+    expect(resolveMemoryFilePath(memoryDir, "alias/new").relativePath).toBe("alias/new.md")
+  })
+
+  test.skipIf(!canSymlink())("still works when the memory directory itself is reached through a link", () => {
+    const real = join(tempDir("memory-"), "memory")
+    mkdirSync(real, { recursive: true })
+    const viaLink = join(tempDir("link-"), "memory")
+    symlinkSync(real, viaLink, "dir")
+    expect(resolveMemoryFilePath(viaLink, "team/x").filePath).toBe(resolve(viaLink, "team", "x.md"))
   })
 })

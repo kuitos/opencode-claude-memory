@@ -125,6 +125,16 @@ bin/                              # 删除（见 01 与 07）
 | 目标 OpenCode ≥ 1.18（`engines.opencode`） | 本机运行时 1.18.16；`PluginModule` 与 `PluginOptions` 均在此版本验证 | [04 §实施步骤 6](04-configuration.md) |
 | `docs/superpowers/` 本就未提交，仓库中不存在 | 其 "Future Extensions" 已并入 `test/evals/README.md` | [06 §6.2](06-cleanup.md) |
 | extraction fork 与 auto-dream 共用跨进程 `maintenance.lock`；`extraction-state.json` 不缓存 | 关闭 issue #30 剩余的"两个进程同一仓库"场景 | [01 §2.3](01-extraction-unification.md) |
+| `extraction-state.json` 的每次 `update()` 在 `extraction-state.lock` 下做读-改-写；watermark 在拿到 `maintenance.lock` 后按当前状态重算，并在释放锁之前落盘；watermark 只向前推进 | review（2026-09-06）F1：两个进程各自提交时互相覆盖、拿锁前的旧快照把 watermark 回退 | [01 §2.3](01-extraction-unification.md) |
+| `maintenance.lock` 改为 token 归属 + 心跳（60s）+ 10 分钟无心跳视为 stale；文件用 hard-link 原子创建；stale 回收在 `maintenance.lock.reap` 下进行；释放/续租先核对 token | review F2：`wx` 创建后写内容的窗口、无条件 unlink 会删掉后继者的锁、1h 硬上限会打断长 fork | [01 §2.3](01-extraction-unification.md) |
+| session 状态新增 `lastMessageAt`（watermark 消息的 `time.created`）；catch-up 与 fallback 切片都比较它而不是 fork 结束时间 | review F3：fork 运行期间完成的新 turn 在重启后被 catch-up 跳过 | [01 §2.2](01-extraction-unification.md) |
+| `session.status` busy/retry 取消待执行的 debounce；出队时复查；切片尾部没有 `time.completed` 的 assistant 消息不提取 | review F4：旧定时器把生成中的回答提取掉并推进 watermark | [01 §2.2](01-extraction-unification.md) |
+| `runForkSession` 的 create / abort / delete 各自有 deadline，并把 `AbortSignal` 传给 SDK 请求；`session.messages` / `session.list` 同样有 30s deadline；清理失败通过 `onCleanupFailed` 记日志 | review F5：SDK 关闭了 fetch 超时，任一阶段挂起会永久占住串行队列与维护锁 | [01 §2.1](01-extraction-unification.md) |
+| `resolveMemoryFilePath` 对最深的已存在路径分量做 realpath 包含性检查；scanner 自己遍历目录且不跟随任何符号链接 | review F6：目录链接可越过 memoryDir 读写删除外部文件 | [03](03-data-model.md) |
+| `POINTER_RE` 的标题部分改为惰性匹配；upsert 折叠重复指针，remove 删除全部同目标指针；保留文件末尾无换行的状态 | review F7 / F9 | [05 §MEMORY.md 最小编辑](05-runtime-behavior.md) |
+| `parseFrontmatterHeader` 先 `trimStart()` 再截 30 行，与 `parseFrontmatter` 一致 | review F10（v1 遗留） | [03](03-data-model.md) |
+| recall 的 TTL 淘汰只清 turn cache，`ignored` 保留到 `session.deleted`；首次见到的 session 从历史回放推导 ignore 状态 | review F8 | [02 §3.5](02-module-structure.md)、[05 §5.6](05-runtime-behavior.md) |
+| 启动时检测 rc 文件中的 v1 hook 标记并通过 `client.app.log` 打 warn（只读，不改文件；home 目录可注入） | review F11：07 承诺的行为此前未实现 | [07](07-migration.md) |
 
 DoD 逐项核对见 PR 描述。
 

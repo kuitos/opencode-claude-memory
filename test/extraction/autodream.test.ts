@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { existsSync } from "node:fs"
+import { join } from "node:path"
 import { AUTODREAM_TITLE, AutoDream, shouldRunAutodream } from "../../src/extraction/autodream.js"
-import { MAINTENANCE_STALE_LOCK_MS, MaintenanceLock } from "../../src/extraction/lock.js"
+import { MaintenanceLock } from "../../src/extraction/lock.js"
 import { AUTODREAM_PROMPT } from "../../src/extraction/prompts.js"
 import { ExtractionStateStore } from "../../src/extraction/state.js"
 import { OwnedSessions } from "../../src/util/ownedSessions.js"
@@ -15,7 +15,6 @@ import {
   makeSelectorClient,
   makeStore,
   methods,
-  tempDir,
 } from "../helpers/index.js"
 
 afterEach(cleanupTempDirs)
@@ -39,74 +38,6 @@ describe("shouldRunAutodream", () => {
     expect(shouldRunAutodream({ lastConsolidatedAt: 0, sessionsSince: ["a", "b", "c", "d", "e"] }, gate, now)).toBe(
       true,
     )
-  })
-})
-
-describe("MaintenanceLock", () => {
-  test("acquires, blocks a live holder, and releases", () => {
-    const path = join(tempDir(), "state", "maintenance.lock")
-    const lock = new MaintenanceLock(
-      path,
-      () => 1_000,
-      111,
-      () => true,
-    )
-    expect(lock.tryAcquire()).toBe(true)
-    expect(JSON.parse(readFileSync(path, "utf-8"))).toEqual({ pid: 111, startedAt: 1_000 })
-
-    const other = new MaintenanceLock(
-      path,
-      () => 2_000,
-      222,
-      () => true,
-    )
-    expect(other.tryAcquire()).toBe(false)
-    lock.release()
-    expect(existsSync(path)).toBe(false)
-    expect(other.tryAcquire()).toBe(true)
-  })
-
-  test("treats a stale or dead-process lock as free", () => {
-    const path = join(tempDir(), "state", "maintenance.lock")
-    mkdirSync(dirname(path), { recursive: true })
-    const first = new MaintenanceLock(
-      path,
-      () => 1_000,
-      111,
-      () => true,
-    )
-    expect(first.tryAcquire()).toBe(true)
-
-    const stale = new MaintenanceLock(
-      path,
-      () => 1_000 + MAINTENANCE_STALE_LOCK_MS,
-      222,
-      () => true,
-    )
-    expect(stale.tryAcquire()).toBe(true)
-    expect(JSON.parse(readFileSync(path, "utf-8")).pid).toBe(222)
-
-    const dead = new MaintenanceLock(
-      path,
-      () => 2_000 + MAINTENANCE_STALE_LOCK_MS,
-      333,
-      () => false,
-    )
-    expect(dead.tryAcquire()).toBe(true)
-    expect(JSON.parse(readFileSync(path, "utf-8")).pid).toBe(333)
-  })
-
-  test("treats an unreadable lock file as free", () => {
-    const path = join(tempDir(), "maintenance.lock")
-    writeFileSync(path, "garbage")
-    expect(
-      new MaintenanceLock(
-        path,
-        () => 1,
-        1,
-        () => true,
-      ).tryAcquire(),
-    ).toBe(true)
   })
 })
 

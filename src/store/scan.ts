@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs"
+import { type Dirent, readdirSync, readFileSync, statSync } from "node:fs"
 import { basename, join, sep } from "node:path"
 import { type MemoryType, parseFrontmatter, parseFrontmatterHeader, parseMemoryType } from "./frontmatter.js"
 import { ENTRYPOINT_NAME, MAX_MEMORY_FILES } from "./paths.js"
@@ -86,26 +86,43 @@ export type ScanOptions = {
   recursive?: boolean
 }
 
+// Own directory walk instead of `readdirSync({ recursive })`: symbolic links (files or directories)
+// are never followed, so a link planted in the memory directory cannot pull outside files into the
+// manifest or into recall. Whether the runtime's recursive readdir follows links is not relied on.
+function listMarkdownFiles(memoryDir: string, recursive: boolean): string[] {
+  const out: string[] = []
+  const walk = (dir: string, prefix: string) => {
+    let entries: Dirent[]
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      const name = String(entry.name)
+      const relative = prefix ? `${prefix}/${name}` : name
+      if (entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) {
+        if (recursive) walk(join(dir, name), relative)
+      } else if (entry.isFile() && name.endsWith(".md") && name !== ENTRYPOINT_NAME) {
+        out.push(relative)
+      }
+    }
+  }
+  walk(memoryDir, "")
+  return out
+}
+
 /**
  * Port of Claude Code's scanMemoryFiles(): recursive scan of the memory directory, header-only
  * parsing, sorted by mtime desc and capped at MAX_MEMORY_FILES.
  */
 export function scanMemoryFiles(memoryDir: string, options: ScanOptions = {}): MemoryHeader[] {
-  const recursive = options.recursive ?? true
-  let entries: string[]
-  try {
-    entries = readdirSync(memoryDir, { recursive, encoding: "utf-8" }) as string[]
-  } catch {
-    return []
-  }
-
   const headers: MemoryHeader[] = []
-  for (const entry of entries) {
-    if (!entry.endsWith(".md") || basename(entry) === ENTRYPOINT_NAME) continue
-    const header = readMemoryHeader(memoryDir, toPosixRelative(entry))
+  for (const entry of listMarkdownFiles(memoryDir, options.recursive ?? true)) {
+    const header = readMemoryHeader(memoryDir, entry)
     if (header) headers.push(header)
   }
-
   return headers.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, MAX_MEMORY_FILES)
 }
 

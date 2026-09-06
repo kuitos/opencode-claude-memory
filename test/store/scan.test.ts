@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { writeFileSync } from "node:fs"
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { FRONTMATTER_MAX_LINES } from "../../src/store/frontmatter.js"
 import {
@@ -9,7 +9,7 @@ import {
   scanMemoryFiles,
   surfaceKey,
 } from "../../src/store/scan.js"
-import { cleanupTempDirs, tempDir, writeRawMemory } from "../helpers/index.js"
+import { canSymlink, cleanupTempDirs, tempDir, writeRawMemory } from "../helpers/index.js"
 
 afterEach(cleanupTempDirs)
 
@@ -128,5 +128,25 @@ describe("formatMemoryManifest / surfaceKey", () => {
 
   test("surfaceKey combines name and type", () => {
     expect(surfaceKey(header({ name: "Only", type: "project" }))).toBe("Only|project")
+  })
+})
+
+describe("scanMemoryFiles and symbolic links (review F6)", () => {
+  test.skipIf(!canSymlink())("never follows file or directory links, even when they point inside", () => {
+    const dir = tempDir()
+    const outside = tempDir("outside-")
+    writeRawMemory(outside, "leak.md", fm("Leak", "outside file", "user"))
+    writeRawMemory(dir, "real.md", fm("Real", "Real memory", "user"))
+    mkdirSync(join(dir, "sub"))
+    writeRawMemory(dir, "sub/nested.md", fm("Nested", "nested", "user"))
+    symlinkSync(join(outside, "leak.md"), join(dir, "leak.md"), "file")
+    symlinkSync(outside, join(dir, "linked"), "dir")
+    symlinkSync(join(dir, "sub"), join(dir, "alias"), "dir")
+
+    expect(
+      scanMemoryFiles(dir)
+        .map((h) => h.filename)
+        .sort(),
+    ).toEqual(["real.md", "sub/nested.md"])
   })
 })

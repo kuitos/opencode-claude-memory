@@ -28,7 +28,7 @@ src/
 │   ├── prompts.ts                # EXTRACT_PROMPT / AUTODREAM_PROMPT (only copies)
 │   ├── forkSession.ts            # create → prompt(timeout) → abort-on-timeout → delete; shared by recall/extract/dream
 │   ├── state.ts                  # extraction-state.json (watermarks, autodream gate), atomic writes, v1 lock migration, posixCksum
-│   ├── lock.ts                   # Cross-process maintenance lock (extraction + auto-dream), stale/dead-PID detection
+│   ├── lock.ts                   # Cross-process maintenance lock: token ownership, heartbeat, reap-lock guarded stale recovery
 │   ├── autodream.ts              # Gate + consolidation fork
 │   └── ExtractionCoordinator.ts  # session.idle debounce → serial queue → incremental fork; start-up catch-up; recordSave
 ├── hooks/
@@ -36,10 +36,14 @@ src/
 │   └── ignore.ts                 # ignore / resume detection, stripAutoMemoryParts (by marker)
 └── util/
     ├── log.ts                    # client.app.log wrapper (never stderr)
-    └── ownedSessions.ts          # Plugin-owned child sessions with grace-period release
+    ├── ownedSessions.ts          # Plugin-owned child sessions with grace-period release
+    ├── exclusiveFile.ts          # Atomic create-if-absent (tmp + hard link) and the short cross-process file lock
+    ├── timeout.ts                # withDeadline(): bounded SDK calls with an AbortSignal
+    └── legacyShellHook.ts        # Read-only detection of v1's shell hook in rc files
 
 test/
-├── helpers/index.ts              # temp dirs, makeStore/makeConfig/makePlugin (env injected), mock clients, message builders
+├── helpers/index.ts              # temp dirs, makeStore/makeConfig/makePlugin (env + home injected), mock clients, message builders
+├── helpers/processWorker.ts      # real worker processes for the cross-process state/lock tests
 ├── *.test.ts, store/, recall/, extraction/   # unit + plugin-level tests (bun test)
 └── evals/                        # task evals: memory-on vs memory-off system prompts (see test/evals/README.md)
 ```
@@ -65,14 +69,17 @@ test/
 - **ESM `.js` imports**, `node:` protocol for built-ins.
 - **biome** for lint + format (`bun run lint`); `tsconfig.json` covers `src` and `test` with `noUncheckedIndexedAccess`; `tsconfig.build.json` emits `dist/`.
 - **No process-level state**: every `Map`/`Set` lives on a coordinator instance created per `MemoryPlugin` call. `grep -rn "^const .* = new \(Map\|Set\)" src/` must stay empty.
-- **No environment variables except `CLAUDE_CONFIG_DIR`** (read in `config.ts` only). Tests inject `env` via `createMemoryPlugin(env)` / `parseConfig(options, env)` and never write `process.env`.
+- **No environment variables except `CLAUDE_CONFIG_DIR`** (read in `config.ts` only). Tests inject `env` and the home directory via `createMemoryPlugin(env, homeDir)` / `parseConfig(options, env, homeDir)` and never write `process.env` or read the real home.
+- **Every SDK call has a deadline** (`util/timeout.ts` `withDeadline`): the SDK disables fetch timeouts, so an unbounded `await client.session.*` can pin the extraction queue and the maintenance lock forever.
+- **State is transactional**: `ExtractionStateStore.update()` runs under a file lock and the mutate callback must decide against the data it is given, never against an earlier snapshot. The maintenance lock is held until the watermark is written.
 - **Logging** goes through `client.app.log` (`util/log.ts`); stderr is rendered into the chat UI.
 - **Silent catch blocks** around file I/O are intentional (files may not exist).
 - **`@opencode-ai/plugin`** is a peer dependency; SDK types are derived in `src/sdk.ts` — do not hand-write client subsets.
 
 ## Anti-patterns
 
-- **NEVER** touch memory files without `resolveMemoryFilePath()` / `MemoryStore` — path traversal risk; `MEMORY` is reserved.
+- **NEVER** touch memory files without `resolveMemoryFilePath()` / `MemoryStore` — path traversal and symlink-escape risk; `MEMORY` is reserved. The scanner walks directories itself and never follows links.
+- **NEVER** extract a slice whose trailing assistant message has no `time.completed`, and never advance a watermark backwards (`ExtractionCoordinator.advance` is monotonic).
 - **NEVER** rewrite `MEMORY.md` wholesale — use `upsertIndexLine` / `removeIndexLine` (Claude Code formatting must survive).
 - **NEVER** run a fork without a tool sandbox and timeout (`runForkSession` with `tools` and `timeoutMs`); forks read untrusted transcript content.
 - **NEVER** treat a plugin-owned session (`OwnedSessions`) as a user session in hooks or events.
@@ -96,7 +103,9 @@ test/
 | `FORK_GRACE_MS` | 60 s | `extraction/ExtractionCoordinator.ts` |
 | `MAX_EXTRACTION_FAILURES` | 3 | `extraction/ExtractionCoordinator.ts` |
 | `SESSION_STATE_TTL_MS` (extraction state) | 30 d | `extraction/state.ts` |
-| `MAINTENANCE_STALE_LOCK_MS` | 1 h | `extraction/lock.ts` |
+| `MAINTENANCE_STALE_LOCK_MS` / `MAINTENANCE_HEARTBEAT_MS` | 10 min / 60 s | `extraction/lock.ts` |
+| `FORK_CREATE_TIMEOUT_MS` / `FORK_CLEANUP_TIMEOUT_MS` | 30 s / 15 s | `extraction/forkSession.ts` |
+| `SDK_READ_TIMEOUT_MS` | 30 s | `extraction/ExtractionCoordinator.ts` |
 
 ## Commands
 
@@ -112,7 +121,7 @@ bun run build            # dist/ via tsconfig.build.json
 ## Notes
 
 - Memory directory: `<CLAUDE_CONFIG_DIR>/projects/<sanitizePath(canonicalGitRoot)>/memory/`, shared with Claude Code. `sanitizePath` / `djb2Hash` are exact copies of Claude Code's.
-- Plugin state: `<CLAUDE_CONFIG_DIR>/opencode-memory/<same key>/extraction-state.json` (+ `maintenance.lock`, shared by extraction forks and auto-dream across processes). A v1 `<cksum>.consolidate-lock` is migrated on first catch-up.
+- Plugin state: `<CLAUDE_CONFIG_DIR>/opencode-memory/<same key>/extraction-state.json` (+ `extraction-state.lock` around every update, + `maintenance.lock` shared by extraction forks and auto-dream across processes). A v1 `<cksum>.consolidate-lock` is migrated on first catch-up; a v1 shell hook still present in an rc file is reported with a warn log.
 - Agent names are fixed: `opencode-memory-recall`, `opencode-memory-extract`, `opencode-memory-dream`. The `config` hook merges defaults under whatever the user configured.
 - OpenCode dedupes `plugin` entries by package name across global/project config, last one wins — plugin options are not merged across files.
 - Design history for v2 lives in `docs/v2/`.

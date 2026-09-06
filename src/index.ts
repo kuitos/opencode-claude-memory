@@ -14,12 +14,12 @@ import { OwnedSessions } from "./util/ownedSessions.js"
 export const PLUGIN_ID = "opencode-claude-memory"
 
 // Assembly only. Every piece of mutable state lives on the coordinators created here, so OpenCode's
-// multi-directory `serve` gets fully isolated instances. `env` is injectable so tests never touch
-// the real environment (CLAUDE_CONFIG_DIR is the only variable read, see config.ts).
+// multi-directory `serve` gets fully isolated instances. `env` and `homeDir` are injectable so tests
+// never touch the real environment (CLAUDE_CONFIG_DIR is the only variable read, see config.ts).
 export const createMemoryPlugin =
-  (env?: NodeJS.ProcessEnv): Plugin =>
+  (env?: NodeJS.ProcessEnv, homeDir?: string): Plugin =>
   async ({ worktree, directory, client }, options) => {
-    const config = parseConfig(options, env)
+    const config = parseConfig(options, env, homeDir)
     const dir = directory ?? worktree
     const store = new MemoryStore(resolveMemoryRoot(worktree, dir), config)
     const log = createLogger(client, dir)

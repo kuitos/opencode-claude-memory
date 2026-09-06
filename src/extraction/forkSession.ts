@@ -1,6 +1,16 @@
 // Lifecycle of a plugin-owned child session: create → prompt (with timeout) → abort on timeout →
 // delete (best-effort). Shared by recall selection, extraction and auto-dream.
+//
+// Every stage has its own deadline and AbortSignal: the SDK client disables fetch timeouts, so a
+// hung `create`, `abort` or `delete` would otherwise pin the caller (and with it the extraction
+// queue and the maintenance lock) forever. `onFinished` always fires, even when cleanup timed out.
 import { type OpencodeClient, unwrapData } from "../sdk.js"
+import { TimeoutError, withDeadline } from "../util/timeout.js"
+
+export const FORK_CREATE_TIMEOUT_MS = 30_000
+export const FORK_CLEANUP_TIMEOUT_MS = 15_000
+
+export type ForkCleanupStage = "abort" | "delete"
 
 export type ForkSessionInput = {
   client: OpencodeClient
@@ -14,10 +24,14 @@ export type ForkSessionInput = {
   format?: unknown
   model?: { providerID: string; modelID: string }
   timeoutMs: number
+  createTimeoutMs?: number
+  cleanupTimeoutMs?: number
   // Lets the caller register the fork as plugin-owned before any of its events can arrive.
   onCreated?: (forkID: string) => void
-  // Called after delete so the caller can schedule the guard release.
+  // Called after cleanup (successful or not) so the caller can schedule the guard release.
   onFinished?: (forkID: string) => void
+  // A cleanup call that failed or timed out: the server may still hold the fork session.
+  onCleanupFailed?: (forkID: string, stage: ForkCleanupStage, error: unknown) => void
 }
 
 export class ForkSessionTimeoutError extends Error {
@@ -70,25 +84,21 @@ export class ForkSessionError extends Error {
   }
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, error: () => Error): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(error()), timeoutMs)
-  })
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer)
-  })
-}
-
 // Security: forks run on raw, potentially untrusted transcript content (fetched pages, tool output).
-// Callers restrict `tools` to the memory tools and the wall-clock timeout guarantees cleanup even
-// when the fork hangs on a permission prompt.
+// Callers restrict `tools` to the memory tools; the per-stage deadlines guarantee the caller gets
+// control back even when the fork hangs on a permission prompt or the server stops answering.
 export async function runForkSession(input: ForkSessionInput): Promise<unknown> {
   const { client, directory } = input
-  const created = await client.session.create({
-    body: { parentID: input.parentSessionID, title: input.title },
-    query: { directory },
-  })
+  const createTimeoutMs = input.createTimeoutMs ?? FORK_CREATE_TIMEOUT_MS
+  const cleanupTimeoutMs = input.cleanupTimeoutMs ?? FORK_CLEANUP_TIMEOUT_MS
+
+  const created = await withDeadline(`${input.title} session.create`, createTimeoutMs, (signal) =>
+    client.session.create({
+      body: { parentID: input.parentSessionID, title: input.title },
+      query: { directory },
+      signal,
+    }),
+  )
   const createFailure = forkFailure(created)
   if (createFailure) throw new ForkSessionError(input.title, `session.create failed (${createFailure})`)
   const forkID = extractSessionID(created)
@@ -105,26 +115,43 @@ export async function runForkSession(input: ForkSessionInput): Promise<unknown> 
   if (input.format !== undefined) body.format = input.format
   if (input.model !== undefined) body.model = input.model
 
+  const cleanup = async (stage: ForkCleanupStage): Promise<void> => {
+    try {
+      await withDeadline(`${input.title} session.${stage}`, cleanupTimeoutMs, (signal) =>
+        stage === "abort"
+          ? client.session.abort({ path: { id: forkID }, query: { directory }, signal })
+          : client.session.delete({ path: { id: forkID }, query: { directory }, signal }),
+      )
+    } catch (error) {
+      input.onCleanupFailed?.(forkID, stage, error)
+    }
+  }
+
   let timedOut = false
   try {
-    const response = await withTimeout(
-      client.session.prompt({ path: { id: forkID }, query: { directory }, body: body as never }),
-      input.timeoutMs,
-      () => {
+    let response: unknown
+    try {
+      response = await withDeadline(`${input.title} session.prompt`, input.timeoutMs, (signal) =>
+        client.session.prompt({ path: { id: forkID }, query: { directory }, body: body as never, signal }),
+      )
+    } catch (error) {
+      if (error instanceof TimeoutError) {
         timedOut = true
-        return new ForkSessionTimeoutError(input.title, input.timeoutMs)
-      },
-    )
+        throw new ForkSessionTimeoutError(input.title, input.timeoutMs)
+      }
+      throw error
+    }
     const failure = forkFailure(response)
     if (failure) throw new ForkSessionError(input.title, failure)
     return response
   } finally {
-    // On timeout the server is still running the fork: stop it before deleting the session so it
-    // does not keep inserting parts for a row that no longer exists.
-    if (timedOut) {
-      await Promise.resolve(client.session.abort({ path: { id: forkID }, query: { directory } })).catch(() => {})
+    try {
+      // On timeout the server is still running the fork: stop it before deleting the session so it
+      // does not keep inserting parts for a row that no longer exists.
+      if (timedOut) await cleanup("abort")
+      await cleanup("delete")
+    } finally {
+      input.onFinished?.(forkID)
     }
-    await Promise.resolve(client.session.delete({ path: { id: forkID }, query: { directory } })).catch(() => {})
-    input.onFinished?.(forkID)
   }
 }

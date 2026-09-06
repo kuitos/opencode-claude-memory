@@ -148,3 +148,40 @@ describe("truncateEntrypoint", () => {
     expect(result.content).toContain("lines and")
   })
 })
+
+describe("index pointers with brackets and duplicates (review F7)", () => {
+  test("a title containing brackets is recognised on update and on delete", () => {
+    const pointer = buildIndexPointer("x.md", "Use [Bun]", "first")
+    let raw = upsertIndexLine("", "x.md", pointer)
+    expect(raw).toBe("- [Use [Bun]](x.md) — first\n")
+    raw = upsertIndexLine(raw, "x.md", buildIndexPointer("x.md", "Use [Bun]", "second"))
+    expect(raw).toBe("- [Use [Bun]](x.md) — second\n")
+    expect(removeIndexLine(raw, "x.md")).toBe("")
+  })
+
+  test("a description containing another link does not confuse the target", () => {
+    const raw = "- [A](a.md) — see also [B](b.md)\n- [B](b.md) — b\n"
+    expect(upsertIndexLine(raw, "a.md", "- [A](a.md) — updated")).toBe("- [A](a.md) — updated\n- [B](b.md) — b\n")
+    expect(removeIndexLine(raw, "b.md")).toBe("- [A](a.md) — see also [B](b.md)\n")
+  })
+
+  test("duplicate pointers for one file collapse on upsert and all vanish on delete", () => {
+    const raw = "# Index\n- [Old](x.md) — one\n- [Other](y.md) — y\n- [Old again](x.md) — two\n"
+    expect(upsertIndexLine(raw, "x.md", "- [New](x.md) — new")).toBe(
+      "# Index\n- [New](x.md) — new\n- [Other](y.md) — y\n",
+    )
+    expect(removeIndexLine(raw, "x.md")).toBe("# Index\n- [Other](y.md) — y\n")
+  })
+})
+
+describe("end-of-file newline (review F9)", () => {
+  test("a file without a trailing newline keeps it that way on replace, append and remove", () => {
+    const raw = "# Index\n- [Old](a.md) — old\nFooter without EOL"
+    expect(upsertIndexLine(raw, "a.md", "- [New](a.md) — new")).toBe("# Index\n- [New](a.md) — new\nFooter without EOL")
+    expect(upsertIndexLine(raw, "b.md", "- [B](b.md) — b")).toBe(
+      "# Index\n- [Old](a.md) — old\n- [B](b.md) — b\nFooter without EOL",
+    )
+    expect(removeIndexLine(raw, "a.md")).toBe("# Index\nFooter without EOL")
+    expect(upsertIndexLine("- [Only](o.md) — o", "n.md", "- [N](n.md) — n")).toBe("- [Only](o.md) — o\n- [N](n.md) — n")
+  })
+})

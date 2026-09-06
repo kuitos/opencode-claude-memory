@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { readFileSync, writeFileSync } from "node:fs"
 import {
   buildConversationForExtraction,
   EXTRACTION_TITLE,
@@ -6,6 +7,7 @@ import {
   hasExtractableUserMessage,
   MAX_EXTRACTION_FAILURES,
   sliceNewMessages,
+  trimIncompleteTail,
 } from "../../src/extraction/ExtractionCoordinator.js"
 import { MaintenanceLock } from "../../src/extraction/lock.js"
 import { EXTRACT_EXISTING_MEMORIES_HEADING } from "../../src/extraction/prompts.js"
@@ -25,6 +27,7 @@ import {
   message,
   methods,
   seedMemory,
+  tempDir,
   textPart,
   toolPart,
   userMessage,
@@ -72,6 +75,11 @@ function setup(options: { conversations?: Conversation; sessions?: unknown[]; co
   return { store, config, selector, conversations, owned, entries, state, coordinator, tick, now: () => now }
 }
 
+function promptText(body: Record<string, unknown> | undefined): string {
+  const parts = (body?.parts ?? []) as Array<{ text?: string }>
+  return parts[0]?.text ?? ""
+}
+
 function promptCalls(calls: readonly ClientCall[]) {
   return calls.filter((c) => c.method === "prompt").map((c) => (c.options as { body: Record<string, unknown> }).body)
 }
@@ -95,7 +103,7 @@ const conversation = (sessionID: string, turns: number): ChatMessage[] => {
       message("assistant", [textPart(`Noted, turn ${i}.`), toolPart("grep", "completed", "match")], {
         sessionID,
         id: `${sessionID}_a${i}`,
-        time: { created: i * 10 + 5 },
+        time: { created: i * 10 + 5, completed: i * 10 + 8 },
       }),
     )
   }
@@ -360,5 +368,249 @@ describe("pure helpers", () => {
     expect(buildConversationForExtraction([message("user", [textPart("synthetic", { synthetic: true })])], 1000)).toBe(
       "",
     )
+  })
+})
+
+// ─── regressions from the v2 review ──────────────────────────────────────────
+
+function turn(sessionID: string, n: number, userText: string, assistantText = `Noted, turn ${n}.`): ChatMessage[] {
+  return [
+    userMessage(userText, sessionID, { id: `${sessionID}_u${n}`, time: { created: n * 10 } }),
+    message("assistant", [textPart(assistantText)], {
+      sessionID,
+      id: `${sessionID}_a${n}`,
+      time: { created: n * 10 + 5, completed: n * 10 + 8 },
+    }),
+  ]
+}
+
+describe("ExtractionCoordinator watermark transactions (review F1)", () => {
+  test("a snapshot taken before the lock never rolls the watermark back over another process's progress", async () => {
+    const { coordinator, selector, conversations, state } = setup()
+    conversations.ses_r = turn("ses_r", 1, "Remember PostgreSQL for this project.")
+
+    // Between our messages() read and our lock acquisition, "another process" extracts through a2.
+    let injected = false
+    const messages = selector.raw.session.messages
+    selector.raw.session.messages = async (opts) => {
+      const result = await messages(opts)
+      if (!injected) {
+        injected = true
+        new ExtractionStateStore(state.stateDir).update((data) => {
+          data.sessions.ses_r = {
+            lastExtractedMessageID: "ses_r_a2",
+            lastMessageAt: 25,
+            updatedAt: Date.now(),
+            failures: 0,
+          }
+        })
+      }
+      return result
+    }
+
+    await idle(coordinator, "ses_r")
+    expect(promptCalls(selector.calls)).toHaveLength(0)
+    expect(state.getSession("ses_r")?.lastExtractedMessageID).toBe("ses_r_a2")
+  })
+
+  test("the main-agent short-circuit and the short-conversation path also respect a newer watermark", async () => {
+    const { coordinator, conversations, state } = setup()
+    conversations.ses_s = turn("ses_s", 1, "Remember PostgreSQL for this project.")
+    state.update((data) => {
+      data.sessions.ses_s = { lastExtractedMessageID: "gone", lastMessageAt: 999, updatedAt: Date.now(), failures: 0 }
+    })
+    coordinator.recordSave("ses_s", "x.md")
+    await idle(coordinator, "ses_s")
+    expect(state.getSession("ses_s")?.lastExtractedMessageID).toBe("gone")
+  })
+
+  test("the watermark is committed before the maintenance lock is released", async () => {
+    const store = makeStore()
+    const config = makeConfig(
+      { extract: { debounceMs: 0, timeoutMs: 200 }, autodream: { enabled: false } },
+      store.claudeConfigDir,
+    )
+    const selector = makeSelectorClient()
+    const conversations: Conversation = { ses_c: turn("ses_c", 1, "Remember PostgreSQL for this project.") }
+    selector.raw.session.messages = async (opts) => ({
+      data: conversations[(opts as { path: { id: string } }).path.id] ?? [],
+    })
+    const state = new ExtractionStateStore(store.stateDir)
+    let watermarkAtRelease: string | undefined = "not-released"
+    class ObservingLock extends MaintenanceLock {
+      override release(): void {
+        watermarkAtRelease = state.getSession("ses_c")?.lastExtractedMessageID
+        super.release()
+      }
+    }
+    const coordinator = new ExtractionCoordinator({
+      ...makeDeps({ store, config, client: selector.client }),
+      state,
+      lock: new ObservingLock(state.lockPath, Date.now, 4242, () => true),
+    })
+    await idle(coordinator, "ses_c")
+    expect(watermarkAtRelease).toBe("ses_c_a1")
+    expect(state.getSession("ses_c")?.lastMessageAt).toBe(15)
+  })
+})
+
+describe("ExtractionCoordinator catch-up boundary (review F3)", () => {
+  test("a turn that completed while the previous fork was running is caught up after a restart", async () => {
+    const { coordinator, selector, conversations, state, store, config, tick } = setup()
+    conversations.ses_f = turn("ses_f", 1, "Remember our PostgreSQL conventions.")
+    let sessionUpdated = 18
+    const prompt = selector.raw.session.prompt
+    selector.raw.session.prompt = async (opts) => {
+      // A new turn arrives (and finishes) while the fork is still running; the fork ends later.
+      conversations.ses_f = [...(conversations.ses_f ?? []), ...turn("ses_f", 2, "Deployments must wait until Friday.")]
+      sessionUpdated = 28
+      tick(5_000)
+      return prompt(opts)
+    }
+    await idle(coordinator, "ses_f")
+    expect(state.getSession("ses_f")?.lastExtractedMessageID).toBe("ses_f_a1")
+    expect(state.getSession("ses_f")?.lastMessageAt).toBe(15)
+    coordinator.dispose()
+
+    // Restart: the session's last update (28) is newer than the watermark message (15).
+    selector.raw.session.list = async () => ({ data: [{ id: "ses_f", time: { updated: sessionUpdated } }] })
+    selector.calls.length = 0
+    const fresh = new ExtractionCoordinator({
+      ...makeDeps({ store, config, client: selector.client }),
+      state,
+      lock: new MaintenanceLock(state.lockPath, Date.now, 4242, () => true),
+    })
+    await fresh.catchUp()
+    await fresh.idle()
+    const bodies = promptCalls(selector.calls)
+    expect(bodies).toHaveLength(1)
+    const text = promptText(bodies[0])
+    expect(text).toContain("Deployments must wait until Friday.")
+    expect(text).not.toContain("PostgreSQL conventions")
+    expect(state.getSession("ses_f")?.lastExtractedMessageID).toBe("ses_f_a2")
+  })
+
+  test("the fallback slice uses the watermark message time, not the fork's finish time", () => {
+    const messages = turn("ses_x", 2, "second")
+    const state = { lastExtractedMessageID: "missing", lastMessageAt: 15, updatedAt: 99_999, failures: 0 }
+    expect(sliceNewMessages(messages, state).map((m) => m.info.id)).toEqual(["ses_x_u2", "ses_x_a2"])
+  })
+})
+
+describe("ExtractionCoordinator busy sessions (review F4)", () => {
+  test("a busy status cancels the pending debounce; the next idle extracts both turns at once", async () => {
+    const { coordinator, selector, conversations, state, config } = setup()
+    config.extract.debounceMs = 20
+    conversations.ses_b = turn("ses_b", 1, "Remember our PostgreSQL conventions.")
+    coordinator.onEvent({ type: "session.idle", properties: { sessionID: "ses_b" } } as never)
+    // New turn starts before the debounce fires: assistant still streaming (no `completed`).
+    conversations.ses_b = [
+      ...conversations.ses_b,
+      userMessage("Please diagnose the deployment failure.", "ses_b", { id: "ses_b_u2", time: { created: 20 } }),
+      message("assistant", [textPart("Still investigating...")], {
+        sessionID: "ses_b",
+        id: "ses_b_a2",
+        time: { created: 25 },
+      }),
+    ]
+    coordinator.onEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_b", status: { type: "busy" } },
+    } as never)
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await coordinator.idle()
+    expect(promptCalls(selector.calls)).toHaveLength(0)
+    expect(state.getSession("ses_b")).toBeUndefined()
+
+    // The answer completes and the session goes idle.
+    conversations.ses_b = [
+      ...conversations.ses_b.slice(0, 3),
+      message("assistant", [textPart("Final finding: the deploy must use port 8088.")], {
+        sessionID: "ses_b",
+        id: "ses_b_a2",
+        time: { created: 25, completed: 30 },
+      }),
+    ]
+    await idle(coordinator, "ses_b")
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    await coordinator.idle()
+    const bodies = promptCalls(selector.calls)
+    expect(bodies).toHaveLength(1)
+    const text = promptText(bodies[0])
+    expect(text).toContain("PostgreSQL conventions")
+    expect(text).toContain("port 8088")
+    expect(state.getSession("ses_b")?.lastExtractedMessageID).toBe("ses_b_a2")
+  })
+
+  test("an assistant message still being generated is never extracted or used as the watermark", async () => {
+    const { coordinator, selector, conversations, state } = setup()
+    conversations.ses_i = [
+      ...turn("ses_i", 1, "Remember our PostgreSQL conventions."),
+      userMessage("Now diagnose the failure.", "ses_i", { id: "ses_i_u2", time: { created: 20 } }),
+      message("assistant", [textPart("Partial answer so far")], {
+        sessionID: "ses_i",
+        id: "ses_i_a2",
+        time: { created: 25 },
+      }),
+    ]
+    await idle(coordinator, "ses_i")
+    const text = promptText(promptCalls(selector.calls)[0])
+    expect(text).not.toContain("Partial answer so far")
+    expect(state.getSession("ses_i")?.lastExtractedMessageID).toBe("ses_i_u2")
+  })
+
+  test("trimIncompleteTail only drops the trailing streaming run", () => {
+    const done = message("assistant", [textPart("done")], { time: { created: 1, completed: 2 } })
+    const streaming = message("assistant", [textPart("...")], { time: { created: 3 } })
+    const user = userMessage("q", "s")
+    expect(trimIncompleteTail([user, done, streaming]).map((m) => m.info.id)).toEqual([user.info.id, done.info.id])
+    expect(trimIncompleteTail([streaming, user])).toHaveLength(2)
+    expect(trimIncompleteTail([])).toEqual([])
+  })
+
+  test("a job dequeued while its session is busy is skipped and retried on the next idle", async () => {
+    const { coordinator, selector, conversations } = setup()
+    conversations.ses_q = turn("ses_q", 1, "Remember our PostgreSQL conventions.")
+    coordinator.onEvent({ type: "session.idle", properties: { sessionID: "ses_q" } } as never)
+    coordinator.onEvent({
+      type: "session.status",
+      properties: { sessionID: "ses_q", status: { type: "retry" } },
+    } as never)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await coordinator.idle()
+    expect(promptCalls(selector.calls)).toHaveLength(0)
+    await idle(coordinator, "ses_q")
+    expect(promptCalls(selector.calls)).toHaveLength(1)
+  })
+})
+
+describe("ExtractionCoordinator v1 migration (review F11)", () => {
+  test("warns once on start-up when the v1 shell hook is still installed, without touching the file", async () => {
+    const store = makeStore()
+    const home = tempDir("ocm-home-")
+    const rc = `${home}/.zshrc`
+    const original = `export PATH=$PATH:/x\n# >>> opencode-memory auto-initialization >>>\nalias opencode=opencode-memory\n# <<< opencode-memory auto-initialization <<<\n`
+    writeFileSync(rc, original)
+    const config = makeConfig({ extract: { catchUpLimit: 0 } }, store.claudeConfigDir, home)
+    const selector = makeSelectorClient()
+    const { log, entries } = collectingLog()
+    const coordinator = new ExtractionCoordinator(makeDeps({ store, config, client: selector.client, log }))
+    await coordinator.catchUp()
+    await coordinator.catchUp()
+    const warnings = entries.filter(
+      (e) => e.level === "warn" && String(e.message).includes("v1 opencode-memory shell hook"),
+    )
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]?.extra).toEqual({ files: [rc] })
+    expect(readFileSync(rc, "utf-8")).toBe(original)
+  })
+
+  test("stays silent when no rc file carries the marker", async () => {
+    const store = makeStore()
+    const config = makeConfig({ extract: { catchUpLimit: 0 } }, store.claudeConfigDir)
+    const { log, entries } = collectingLog()
+    const coordinator = new ExtractionCoordinator(makeDeps({ store, config, client: makeSelectorClient().client, log }))
+    await coordinator.catchUp()
+    expect(entries.filter((e) => e.level === "warn")).toEqual([])
   })
 })

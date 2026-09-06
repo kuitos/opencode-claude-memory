@@ -1,10 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { MemoryStore } from "../../src/store/MemoryStore.js"
 import * as paths from "../../src/store/paths.js"
 import { sanitizePath } from "../../src/store/paths.js"
-import { cleanupTempDirs, makeStore, seedMemory, tempDir, tempGitRepo, writeRawMemory } from "../helpers/index.js"
+import {
+  canSymlink,
+  cleanupTempDirs,
+  makeStore,
+  seedMemory,
+  tempDir,
+  tempGitRepo,
+  writeRawMemory,
+} from "../helpers/index.js"
 
 afterEach(cleanupTempDirs)
 
@@ -334,4 +342,26 @@ describe("MemoryStore.delete / list / search", () => {
     seedMemory(store, { fileName: "a", name: "A", description: "first", type: "reference" })
     expect(store.manifest()).toMatch(/^- \[reference\] a\.md \(.+\): first$/)
   })
+})
+
+describe("MemoryStore symbolic links (review F6)", () => {
+  test.skipIf(!canSymlink())(
+    "read, save and delete cannot reach outside the memory directory through a directory link",
+    () => {
+      const store = makeStore()
+      const outside = tempDir("outside-")
+      writeFileSync(join(outside, "victim.md"), "outside original")
+      symlinkSync(outside, join(store.memoryDir, "team"), "dir")
+
+      expect(() => store.read("team/victim")).toThrow(/outside the memory directory/)
+      expect(() =>
+        store.save({ fileName: "team/victim", name: "Victim", description: "d", type: "user", content: "overwritten" }),
+      ).toThrow(/outside the memory directory/)
+      expect(() => store.delete("team/victim")).toThrow(/outside the memory directory/)
+      expect(readFileSync(join(outside, "victim.md"), "utf-8")).toBe("outside original")
+      // and the scanner never lists it
+      expect(store.scan().map((h) => h.filename)).toEqual([])
+      expect(store.list()).toEqual([])
+    },
+  )
 })

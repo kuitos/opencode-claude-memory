@@ -68,7 +68,7 @@ type ForkSessionInput = {
 async function runForkSession(input: ForkSessionInput): Promise<unknown /* prompt response */>
 ```
 
-内部：create → 登记 → `Promise.race(prompt, timeout)` → **仅超时**才 `abort`（prompt 本身 reject 时服务端已停止，不再 abort）→ 无论如何 `delete`（best-effort）→ `onFinished(forkID)` → 返回响应或抛出。guard 的延迟释放由调用方在 `onFinished` 里处理。`format`（结构化输出）在 v1 SDK 的 body 类型里缺失但服务端支持，body 以 `as never` 传入并有注释说明。
+内部：create（30s deadline）→ 登记 → prompt（`timeoutMs`）→ **仅超时**才 `abort`（prompt 本身 reject 时服务端已停止，不再 abort）→ 无论如何 `delete`（best-effort）→ `onFinished(forkID)` → 返回响应或抛出。abort / delete 各有 15s deadline；每个阶段都把 `AbortSignal` 传给 SDK 请求（SDK 自身关闭了 fetch 超时），超时即撕掉连接；清理失败通过 `onCleanupFailed` 回调，调用方记 warn（服务端可能仍留着 fork 会话）。`onFinished` 无论清理成败都会执行。guard 的延迟释放由调用方在 `onFinished` 里处理。`format`（结构化输出）在 v1 SDK 的 body 类型里缺失但服务端支持，body 以 `as never` 传入并有注释说明。
 
 ### 2.2 `extraction/ExtractionCoordinator.ts`
 
@@ -94,8 +94,9 @@ class ExtractionCoordinator {
 2. 读 watermark：`state.sessions[sessionID].lastExtractedMessageID`
 3. 取 watermark 之后的消息；若其中没有 `role === "user"` 的非合成消息 → 返回（不启动 LLM）
 4. 只把增量对话（`buildConversationForExtraction`）作为 user part 喂给 fork；system prompt 里附带"已有记忆清单"（`store.scan()` 的 manifest）以替代现在让模型自己 `memory_list` 的做法，减少一次工具往返。实现上 extract agent 的工具白名单为 `memory_save / memory_list / memory_read`（多了 `memory_read`，见 [04](04-configuration.md#53-agent-注册改为-merge-而不是-)）
-5. fork 成功结束后写 watermark = 增量中最后一条 messageID
+5. fork 成功结束后写 watermark = 增量中最后一条 messageID，同时记录该消息的 `time.created` 为 `lastMessageAt`。切片尾部没有 `time.completed` 的 assistant 消息（仍在生成）不进入本次快照
 6. 失败（超时/异常）不推进 watermark，下次 idle 重试；连续失败 N 次后推进（避免卡死在一条坏消息上）
+7. `session.status` 为 busy / retry 时取消该 session 待执行的 debounce，出队时再次确认不在 busy；上一轮与新一轮在下次 idle 一起提取
 
 **watermark 持久化**：`<CLAUDE_CONFIG_DIR>/opencode-memory/<sanitizePath(canonicalRoot)>/extraction-state.json`
 
@@ -103,7 +104,7 @@ class ExtractionCoordinator {
 {
   "version": 1,
   "sessions": {
-    "<sessionID>": { "lastExtractedMessageID": "...", "updatedAt": 1756540800000, "failures": 0 }
+    "<sessionID>": { "lastExtractedMessageID": "...", "lastMessageAt": 1756540790000, "updatedAt": 1756540800000, "failures": 0 }
   },
   "autodream": { "lastConsolidatedAt": 1756454400000, "sessionsSince": ["<id>", "..."] }
 }
@@ -113,7 +114,7 @@ class ExtractionCoordinator {
 
 **启动 catch-up**：插件初始化时（`MemoryPlugin` 内）异步执行 `catchUp()`：
 - `client.session.list({ directory })` 拿到当前目录的 session
-- 对每个 `time.updated > state.sessions[id].updatedAt` 的 session 执行 `runIncremental`（跳过带 `parentID` 的子 session——fork / selector / subagent 会话）
+- 对每个 `time.updated > state.sessions[id].lastMessageAt` 的 session 执行 `runIncremental`（跳过带 `parentID` 的子 session——fork / selector / subagent 会话）。比较的是 watermark **消息**的时间而不是 fork 结束时间：fork 运行期间完成的新 turn 也要被补上
 - 实现补充：`catchUp()` 在 `config` hook 里触发而不是插件初始化时——agent 的工具沙箱要等 `config` hook merge 完才确定；OpenCode 在所有插件加载完后立即调用 `config`，语义等价
 - 用 `nativeExtractionInFlight` 同款互斥防止与 idle 触发重叠
 - 限制并发为 1，按 `time.updated` 降序，最多处理 N 个（配置项 `extract.catchUpLimit`，默认 5）
@@ -131,7 +132,12 @@ class ExtractionCoordinator {
 - `sessionsSince` 由 `runIncremental` 成功时追加（去重），不再需要 `opencode session list` + `jq` 计数
 - 通过 `runForkSession` 执行 `AUTODREAM_PROMPT`，工具白名单 `memory_list / memory_search / memory_read / memory_save / memory_delete`
 - 成功则更新 `lastConsolidatedAt`、清空 `sessionsSince`；失败不改状态（等价于 bash 的 rollback）
-- 互斥：进程内用 coordinator 的串行队列；跨进程用 `extraction-state.json` 旁的 `maintenance.lock`（内容为 `{ pid, startedAt }` JSON，超过 1h 或持有进程已死视为 stale；`wx` 独占创建）——这是 v1 `try_acquire_consolidation_lock` 的直接移植。**实现补充（#30）**：这把锁由 extraction fork 与 auto-dream 共用（`extraction/lock.ts` 的 `MaintenanceLock`），extraction 在 fork + watermark 写入期间持有，争用时跳过且不动 watermark（下次 idle / 启动重试）；`extraction-state.json` 不做内存缓存，每次 update 都重新读文件，避免多进程互相覆盖
+- 互斥：进程内用 coordinator 的串行队列；跨进程用 `extraction-state.json` 旁的 `maintenance.lock`——v1 `try_acquire_consolidation_lock` 的移植，但协议已加固（review 2026-09-06 F1/F2）。**实现补充（#30）**：
+  - 锁文件内容为 `{ pid, token, startedAt, heartbeatAt }`；用"写临时文件 + hard-link 到位"原子创建（`util/exclusiveFile.ts`），不存在半写状态；解析失败但 mtime 在 5s 内的文件视为"正在写入"
+  - 持有期间每 60s 续租 `heartbeatAt`；持有进程已死或心跳超过 10 分钟视为 stale。不再有 1h 硬上限：合法的长 fork 靠心跳保活
+  - stale 回收在 `maintenance.lock.reap` 下进行，回收前重读并确认仍是同一个 stale 内容，因此不会误删刚被别人创建的锁；`release()` / `refresh()` 只在文件仍带本次 token 时才动它
+  - 这把锁由 extraction fork 与 auto-dream 共用（`extraction/lock.ts` 的 `MaintenanceLock`）。extraction 先无锁地判断"有没有可提取的增量"，拿到锁后**按当前磁盘状态重算切片**，fork 成功后**先落盘 watermark 再释放锁**；争用时跳过且不动 watermark（下次 idle / 启动重试）。auto-dream 拿锁后同样重查门控
+  - `extraction-state.json` 不做内存缓存；每次 `update()` 都在 `extraction-state.lock`（短时文件锁，等待而非跳过）下读-改-写，mutate 回调看到的是此刻的磁盘状态。watermark 更新是单调的：若磁盘上的 `lastMessageAt` 已比本次快照新，则不写
 - 超时：`autodream.timeoutMs`（默认 300s），与 extraction 分开配置
 - v1 迁移：`extraction/state.ts` 用 TS 实现 POSIX `cksum`，按 v1 的 key（git toplevel / worktree / canonical root 三个候选）查找 `<CLAUDE_CONFIG_DIR>/opencode-memory/<cksum>.consolidate-lock`，把 mtime 写成 `lastConsolidatedAt` 后删除
 

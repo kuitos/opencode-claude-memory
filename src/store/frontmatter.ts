@@ -63,9 +63,10 @@ export function parseFrontmatter(raw: string): ParsedMemoryFile {
 }
 
 // Header-only variant for the directory scanner: parses the first FRONTMATTER_MAX_LINES lines and
-// never materialises the body.
+// never materialises the body. Leading whitespace is dropped before counting lines, exactly as the
+// full parser does, so both entry points agree on every file (leading blank lines included).
 export function parseFrontmatterHeader(raw: string): { frontmatter: Frontmatter; hasFrontmatter: boolean } {
-  const head = raw.split("\n").slice(0, FRONTMATTER_MAX_LINES).join("\n")
+  const head = raw.trimStart().split("\n").slice(0, FRONTMATTER_MAX_LINES).join("\n")
   const { frontmatter, hasFrontmatter } = parseFrontmatter(head)
   return { frontmatter, hasFrontmatter }
 }

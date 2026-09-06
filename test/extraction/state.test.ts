@@ -10,6 +10,7 @@ import {
   SESSION_STATE_TTL_MS,
 } from "../../src/extraction/state.js"
 import { cleanupTempDirs, tempDir } from "../helpers/index.js"
+import { spawnWorkers } from "./processes.js"
 
 afterEach(cleanupTempDirs)
 
@@ -56,6 +57,59 @@ describe("ExtractionStateStore", () => {
     )
     expect(partial.sessions).toEqual({ a: { updatedAt: 0, failures: 0 } })
     expect(partial.autodream).toEqual({ lastConsolidatedAt: 7, sessionsSince: ["a"] })
+  })
+})
+
+describe("ExtractionStateStore across processes (#30)", () => {
+  test("concurrent updates from several real processes are all kept", async () => {
+    const dir = join(tempDir(), "state")
+    mkdirSync(dir, { recursive: true })
+    const ids = ["a", "b", "c", "d"]
+    const perWorker = 25
+    await spawnWorkers(ids.length, (i) => ["state-update", dir, ids[i] as string, String(perWorker)], {
+      readyDir: dir,
+      ids,
+    })
+    const data = new ExtractionStateStore(dir).read()
+    expect(Object.keys(data.sessions)).toHaveLength(ids.length * perWorker)
+    expect(data.autodream.sessionsSince).toHaveLength(ids.length * perWorker)
+    for (const id of ids) {
+      for (let i = 0; i < perWorker; i++) expect(data.sessions[`${id}-${i}`]?.lastExtractedMessageID).toBe(`${id}-${i}`)
+    }
+    expect(existsSync(join(dir, "extraction-state.lock"))).toBe(false)
+  })
+
+  test("the mutate callback sees the state committed by another process, not a stale snapshot", () => {
+    const dir = join(tempDir(), "state")
+    const first = new ExtractionStateStore(dir)
+    const second = new ExtractionStateStore(dir)
+    const now = Date.now()
+    first.update((data) => {
+      data.sessions.s = { lastExtractedMessageID: "a1", lastMessageAt: 100, updatedAt: now, failures: 0 }
+    })
+    // "second" decided to write a1 earlier, but by now "first" has moved on to a2.
+    first.update((data) => {
+      data.sessions.s = { lastExtractedMessageID: "a2", lastMessageAt: 200, updatedAt: now + 1, failures: 0 }
+    })
+    second.update((data) => {
+      const current = data.sessions.s
+      if ((current?.lastMessageAt ?? 0) > 100) return
+      data.sessions.s = { lastExtractedMessageID: "a1", lastMessageAt: 100, updatedAt: now + 2, failures: 0 }
+    })
+    expect(second.getSession("s")?.lastExtractedMessageID).toBe("a2")
+  })
+
+  test("round-trips lastMessageAt and ignores non-numeric values", () => {
+    const parsed = parseExtractionState(
+      JSON.stringify({
+        sessions: {
+          a: { lastExtractedMessageID: "m", lastMessageAt: 42, updatedAt: 1, failures: 0 },
+          b: { lastMessageAt: "x", updatedAt: 1 },
+        },
+      }),
+    )
+    expect(parsed.sessions.a?.lastMessageAt).toBe(42)
+    expect(parsed.sessions.b).toEqual({ updatedAt: 1, failures: 0 })
   })
 })
 

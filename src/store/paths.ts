@@ -2,7 +2,7 @@
 // Directory: <CLAUDE_CONFIG_DIR>/projects/<sanitizePath(canonicalGitRoot)>/memory/
 // Pure functions only: no directory creation, no environment access. MemoryStore owns the side effects.
 
-import { readFileSync, realpathSync, statSync } from "node:fs"
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { dirname, isAbsolute, join, parse, resolve, sep } from "node:path"
 
 export const ENTRYPOINT_NAME = "MEMORY.md"
@@ -51,13 +51,51 @@ export function validateMemoryFileName(fileName: string): string {
   return `${segments.join("/")}.md`
 }
 
+function canonical(path: string): string | undefined {
+  try {
+    return realpathSync.native(path)
+  } catch {
+    return undefined
+  }
+}
+
+function existsNoFollow(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function isInside(path: string, root: string): boolean {
+  return path === root || path.startsWith(root + sep)
+}
+
 // Validates the name and resolves it inside `memoryDir`, refusing anything that escapes it.
+//
+// Lexical containment (`resolve` + prefix) is not enough once sub-directories are allowed: a
+// symbolic link inside the memory directory (`team -> /elsewhere`) would let `team/x` read, overwrite
+// or delete a file outside it. The deepest existing path component is therefore resolved through
+// the filesystem and must land inside the *real* memory directory. Links that stay inside the
+// memory directory are fine; a dangling link is rejected because writing through it would create
+// a file wherever it points.
 export function resolveMemoryFilePath(memoryDir: string, fileName: string): { relativePath: string; filePath: string } {
   const relativePath = validateMemoryFileName(fileName)
   const root = resolve(memoryDir)
   const filePath = resolve(root, ...relativePath.split("/"))
   if (!filePath.startsWith(root + sep)) {
     throw new Error(`Memory file name resolves outside the memory directory: ${fileName}`)
+  }
+
+  const realRoot = canonical(root)
+  if (realRoot !== undefined) {
+    let probe = filePath
+    while (probe !== root && !existsNoFollow(probe)) probe = dirname(probe)
+    const realProbe = canonical(probe)
+    if (realProbe === undefined || !isInside(realProbe, realRoot)) {
+      throw new Error(`Memory file name resolves outside the memory directory: ${fileName}`)
+    }
   }
   return { relativePath, filePath }
 }

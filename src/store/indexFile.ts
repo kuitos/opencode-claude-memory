@@ -3,8 +3,10 @@
 import { readFileSync } from "node:fs"
 import { ENTRYPOINT_NAME, MAX_ENTRYPOINT_BYTES, MAX_ENTRYPOINT_LINES } from "./paths.js"
 
-// Only markdown list items of the form `- [Title](file.md) ...` count as index pointers.
-export const POINTER_RE = /^\s*[-*]\s+\[([^\]]*)\]\(([^)]+)\)/
+// Only markdown list items of the form `- [Title](file.md) ...` count as index pointers. The label
+// is matched lazily so titles containing brackets (`[Use [Bun]](x.md)`) resolve to the first
+// `](target)` that looks like a file reference; the target may not contain whitespace or parens.
+export const POINTER_RE = /^\s*[-*]\s+\[(.*?)\]\(([^()\s]+)\)/
 
 export function readIndexFile(entrypoint: string): string {
   try {
@@ -26,7 +28,7 @@ function detectEol(raw: string): string {
   return raw.includes("\r\n") ? "\r\n" : "\n"
 }
 
-function pointerTarget(line: string): string | undefined {
+export function pointerTarget(line: string): string | undefined {
   const match = POINTER_RE.exec(line)
   return match?.[2]
 }
@@ -45,9 +47,28 @@ function splitIndex(raw: string): IndexLines {
   return { lines, eol, trailingNewline }
 }
 
+// Re-joins with the file's own line-ending style and its original end-of-file newline state: a
+// file that did not end with a newline keeps not ending with one (05 §"MEMORY.md 最小编辑").
 function joinIndex(parts: IndexLines): string {
   if (parts.lines.length === 0) return ""
-  return parts.lines.join(parts.eol) + parts.eol
+  return parts.lines.join(parts.eol) + (parts.trailingNewline ? parts.eol : "")
+}
+
+// Removes every line except the first one that points at `fileName`; returns the index of the
+// kept line (or -1). Duplicate pointers arise from hand edits or from older writers that failed to
+// recognise a line, and would otherwise accumulate and leave dangling entries behind on delete.
+function dedupePointers(lines: string[], fileName: string, keepFirst: boolean): number {
+  let kept = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (pointerTarget(lines[i] ?? "") !== fileName) continue
+    if (kept === -1 && keepFirst) {
+      kept = i
+      continue
+    }
+    lines.splice(i, 1)
+    i -= 1
+  }
+  return kept
 }
 
 // Replaces the pointer line for `fileName` in place, or appends it after the last pointer line
@@ -57,7 +78,7 @@ export function upsertIndexLine(raw: string, fileName: string, pointer: string):
 
   const parts = splitIndex(raw)
   const { lines } = parts
-  const existingIdx = lines.findIndex((line) => pointerTarget(line) === fileName)
+  const existingIdx = dedupePointers(lines, fileName, true)
   if (existingIdx >= 0) {
     const indent = /^\s*/.exec(lines[existingIdx] ?? "")?.[0] ?? ""
     lines[existingIdx] = indent + pointer
@@ -78,11 +99,11 @@ export function upsertIndexLine(raw: string, fileName: string, pointer: string):
     if (lines.length > 0 && (lines[lines.length - 1] ?? "").trim() !== "") lines.push("")
     lines.push(pointer)
   }
-  return joinIndex({ ...parts, trailingNewline: true })
+  return joinIndex(parts)
 }
 
-// Removes the pointer line for `fileName`; collapses the blank lines around it so the removal never
-// leaves two consecutive blank lines behind.
+// Removes the pointer line(s) for `fileName`; collapses the blank lines around it so the removal
+// never leaves two consecutive blank lines behind.
 export function removeIndexLine(raw: string, fileName: string): string {
   if (!raw) return raw
   const parts = splitIndex(raw)
@@ -90,7 +111,7 @@ export function removeIndexLine(raw: string, fileName: string): string {
   const idx = lines.findIndex((line) => pointerTarget(line) === fileName)
   if (idx === -1) return raw
 
-  lines.splice(idx, 1)
+  dedupePointers(lines, fileName, false)
   const before = idx - 1
   const after = idx
   const isBlank = (i: number) => i >= 0 && i < lines.length && (lines[i] ?? "").trim() === ""

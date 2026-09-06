@@ -2,7 +2,7 @@
 // ignore memory, it stays ignored until they explicitly ask for it back.
 import { AUTO_MEMORY_MARKER } from "../prompt/systemPrompt.js"
 import type { ChatMessage, MessagePart } from "../sdk.js"
-import { roleOf } from "./messages.js"
+import { extractUserQuery, roleOf } from "./messages.js"
 
 export function detectIgnoreMemory(query: string | undefined): boolean {
   if (!query) return false
@@ -21,6 +21,20 @@ export function detectResumeMemory(query: string | undefined): boolean {
     /memory\s+(back\s+)?on\b/.test(normalized) ||
     /stop ignoring\s+(the\s+|your\s+)?memory/.test(normalized)
   )
+}
+
+// Replays every user message in order and returns whether memory is ignored at the end. Used to
+// rebuild session state that the coordinator no longer holds (process restart, cache eviction), so
+// an "ignore memory" said earlier in the session keeps applying without the user repeating it.
+export function deriveIgnoredFromHistory(messages: readonly ChatMessage[]): boolean {
+  let ignored = false
+  for (const message of messages) {
+    if (roleOf(message) !== "user") continue
+    const query = extractUserQuery(message)
+    if (detectIgnoreMemory(query)) ignored = true
+    else if (ignored && detectResumeMemory(query)) ignored = false
+  }
+  return ignored
 }
 
 export function isAutoMemoryPart(part: MessagePart): boolean {
