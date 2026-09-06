@@ -124,35 +124,26 @@ Skip post-action summaries. User reads diffs directly.
 
 ## 🔁 Migrating from v1
 
-v2 removes the shell wrapper and every environment variable. Memory files are untouched.
+v2 removes the shell wrapper, the `opencode-memory` CLI and every `OPENCODE_MEMORY_*` environment variable. Memory files are untouched and need no conversion.
 
 ```bash
-# 1. remove the v1 shell hook (before or after upgrading)
+# 1. remove the v1 shell hook, then the v1 package (v2 no longer needs a global install)
 opencode-memory uninstall     # or delete the ">>> opencode-memory auto-initialization >>>" block from your rc file
-                              # (v2 logs a warning on start-up while that block is still there)
+npm uninstall -g opencode-claude-memory
 
-# 2. upgrade
-npm install -g opencode-claude-memory@2
-
-# 3. drop OPENCODE_MEMORY_* from your shell configuration
+# 2. drop OPENCODE_MEMORY_* from your shell configuration
 grep -n OPENCODE_MEMORY ~/.zshrc ~/.bashrc ~/.zshenv ~/.profile 2>/dev/null
 ```
 
-| v1 environment variable | v2 |
-|---|---|
-| `OPENCODE_MEMORY_EXTRACT=0` | `extract.enabled: false` |
-| `OPENCODE_MEMORY_NATIVE_EXTRACT` | removed — in-process extraction is the only path |
-| `OPENCODE_MEMORY_EXTRACT_TIMEOUT_MS` | `extract.timeoutMs` |
-| `OPENCODE_MEMORY_EXTRACT_MAX_STEPS` | `agent.opencode-memory-extract.steps` |
-| `OPENCODE_MEMORY_MODEL` / `_AGENT` | `agent.opencode-memory-extract.model` (agent name is fixed) |
-| `OPENCODE_MEMORY_RECALL_MODEL` / `_AGENT` | `agent.opencode-memory-recall.model` |
-| `OPENCODE_MEMORY_AUTODREAM=0` | `autodream.enabled: false` |
-| `OPENCODE_MEMORY_AUTODREAM_MIN_HOURS` / `_MIN_SESSIONS` | `autodream.minHours` / `autodream.minSessions` |
-| `OPENCODE_MEMORY_AUTODREAM_MODEL` / `_AGENT` | `agent.opencode-memory-dream.model` |
-| `OPENCODE_MEMORY_AUTODREAM_SCAN_LIMIT`, `_FOREGROUND`, `_TERMINAL_LOG`, `_DIR`, `_SESSION_WAIT_SECONDS`, `_IGNORE` | removed |
-| `CLAUDE_CONFIG_DIR` | unchanged |
+```jsonc
+// 3. pin the major in opencode.json — OpenCode caches npm plugins per specifier,
+//    so a bare "opencode-claude-memory" keeps serving the v1 it installed earlier
+{
+  "plugin": ["opencode-claude-memory@2"]
+}
+```
 
-Other changes: the `opencode-memory` CLI is gone; `python3` / `jq` are no longer needed; the v1 auto-dream lock file (`<CLAUDE_CONFIG_DIR>/opencode-memory/<cksum>.consolidate-lock`) is migrated into the new state file on first start; memory tools accept sub-directory names such as `team/conventions`; `system.transform` may wait up to `recall.waitMs` for the selector; "ignore memory" now lasts for the whole session.
+Everything the environment variables used to control now lives under `extract`, `autodream`, `recall` and `agent.opencode-memory-*` in `opencode.json` — see [Configuration](#-configuration). The v1 documentation, including the full list of environment variables, stays available in the [v1 README](https://github.com/kuitos/opencode-claude-memory/blob/v1.7.7/README.md).
 
 ## ❓ FAQ
 
