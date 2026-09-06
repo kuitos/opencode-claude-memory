@@ -47,9 +47,29 @@ export function fileAgeMs(path: string, now: number = Date.now()): number | unde
   }
 }
 
-// Synchronous sleep without busy-waiting; the state lock is held for a few milliseconds at most.
+// Synchronous, bounded wait for lock retries. Deliberately a busy-wait on the clock rather than
+// `Atomics.wait`: it is only reached while another process holds the state lock (a few
+// milliseconds), and a plain loop cannot block forever on a runtime where the timed wait
+// misbehaves (observed on Windows CI).
 export function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  const until = Date.now() + Math.max(0, ms)
+  while (Date.now() < until) {
+    // spin
+  }
+}
+
+// Windows can refuse to unlink a file another process has open at that instant; retry briefly.
+export function unlinkWithRetry(path: string, attempts = 5): boolean {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      unlinkSync(path)
+      return true
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return true
+      if (i < attempts - 1) sleepSync(2)
+    }
+  }
+  return false
 }
 
 export type FileLockOptions = {
@@ -75,20 +95,12 @@ export function withFileLock<T>(lockPath: string, fn: () => T, options: FileLock
       try {
         return fn()
       } finally {
-        try {
-          unlinkSync(lockPath)
-        } catch {
-          // already reaped
-        }
+        unlinkWithRetry(lockPath)
       }
     }
     const age = fileAgeMs(lockPath)
     if (age !== undefined && age > staleMs) {
-      try {
-        unlinkSync(lockPath)
-      } catch {
-        // someone else reaped it
-      }
+      unlinkWithRetry(lockPath)
       continue
     }
     if (Date.now() >= deadline) {

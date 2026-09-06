@@ -16,7 +16,7 @@
 //   start-up retries.
 import { randomBytes } from "node:crypto"
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs"
-import { createExclusiveSync, fileAgeMs } from "../util/exclusiveFile.js"
+import { createExclusiveSync, fileAgeMs, unlinkWithRetry } from "../util/exclusiveFile.js"
 
 export const MAINTENANCE_STALE_LOCK_MS = 10 * 60 * 1000
 export const MAINTENANCE_HEARTBEAT_MS = 60 * 1000
@@ -165,11 +165,7 @@ export class MaintenanceLock {
     if (!token) return
     const holder = this.readHolder()
     if (holder === undefined || holder === "unreadable" || holder.token !== token) return
-    try {
-      unlinkSync(this.lockPath)
-    } catch {
-      // already gone
-    }
+    unlinkWithRetry(this.lockPath)
   }
 
   private startHeartbeat(): void {
