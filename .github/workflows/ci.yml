@@ -26,7 +26,8 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-  test:
+  test-matrix:
+    name: test (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +47,21 @@ jobs:
 
       - name: Run tests
         run: bun test
+
+  # Aggregate job so branch protection can require a single `test` check
+  # regardless of how many OSes are in the matrix.
+  test:
+    needs: test-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Check matrix result
+        run: |
+          if [ "${{ needs.test-matrix.result }}" != "success" ]; then
+            echo "test-matrix result: ${{ needs.test-matrix.result }}"
+            exit 1
+          fi
 
   evals:
     runs-on: ubuntu-latest
