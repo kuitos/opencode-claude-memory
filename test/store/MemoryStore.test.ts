@@ -82,8 +82,8 @@ describe("MemoryStore.save / read", () => {
       fileName: "test_save.md",
       unchanged: false,
     })
-    expect(readFileSync(result.filePath, "utf-8")).toBe(
-      "---\nname: Test Save\ndescription: A test memory\ntype: user\n---\n\nHello world\n",
+    expect(readFileSync(result.filePath, "utf-8")).toMatch(
+      /^---\nname: Test Save\ndescription: A test memory\nmetadata:\n {2}type: user\n {2}origin: opencode\n {2}modified: \S+\n---\n\nHello world\n$/,
     )
     expect(store.readIndex()).toBe("- [Test Save](test_save.md) — A test memory\n")
 
@@ -364,4 +364,64 @@ describe("MemoryStore symbolic links (review F6)", () => {
       expect(store.list()).toEqual([])
     },
   )
+})
+
+describe("MemoryStore provenance (shared folders)", () => {
+  const at = new Date("2026-09-26T12:00:00.000Z")
+  const clockStore = () => new MemoryStore(tempGitRepo(), { claudeConfigDir: tempDir("ocm-claude-"), now: () => at })
+
+  test("stamps files it creates with origin and modified", () => {
+    const store = clockStore()
+    const { filePath } = store.save({ fileName: "a", name: "A", description: "d", type: "user", content: "x" })
+    expect(readFileSync(filePath, "utf-8")).toBe(
+      "---\nname: A\ndescription: d\nmetadata:\n  type: user\n  origin: opencode\n  modified: 2026-09-26T12:00:00.000Z\n---\n\nx\n",
+    )
+  })
+
+  test("keeps another tool's provenance and unknown fields when updating its file", () => {
+    const store = clockStore()
+    const filePath = join(store.memoryDir, "b.md")
+    writeFileSync(
+      filePath,
+      "---\nname: B\ndescription: old\nmetadata:\n  type: project\n  origin: dsh\n  originSessionId: s-1\n  custom: keep me\n---\n\nold body\n",
+    )
+    store.save({ fileName: "b", name: "B", description: "new", type: "project", content: "new body" })
+    expect(readFileSync(filePath, "utf-8")).toBe(
+      "---\nname: B\ndescription: new\nmetadata:\n  type: project\n  origin: dsh\n  originSessionId: s-1\n  custom: keep me\n  modified: 2026-09-26T12:00:00.000Z\n  updatedBy: opencode\n---\n\nnew body\n",
+    )
+  })
+
+  test("updates a top-level type and modified where Claude Code keeps them", () => {
+    const store = clockStore()
+    const filePath = join(store.memoryDir, "c.md")
+    writeFileSync(
+      filePath,
+      "---\nname: C\ndescription: d\ntype: user\nmodified: 2020-01-01T00:00:00.000Z\n---\n\nbody\n",
+    )
+    store.save({ fileName: "c", name: "C", description: "d", type: "feedback", content: "body" })
+    expect(readFileSync(filePath, "utf-8")).toBe(
+      "---\nname: C\ndescription: d\ntype: feedback\nmodified: 2026-09-26T12:00:00.000Z\nmetadata:\n  updatedBy: opencode\n---\n\nbody\n",
+    )
+  })
+
+  test("does not stamp updatedBy on its own files", () => {
+    const store = clockStore()
+    const { filePath } = store.save({ fileName: "d", name: "D", description: "d", type: "user", content: "one" })
+    store.save({ fileName: "d", name: "D", description: "d", type: "user", content: "two" })
+    const text = readFileSync(filePath, "utf-8")
+    expect(text).not.toContain("updatedBy")
+    expect(text).toContain("origin: opencode")
+  })
+
+  test("an identical re-save of another tool's file writes nothing", () => {
+    const store = clockStore()
+    const filePath = join(store.memoryDir, "e.md")
+    const original = "---\nname: E\ndescription: d\nmetadata:\n  type: user\n  origin: dsh\n---\n\nbody\n"
+    writeFileSync(filePath, original)
+    writeFileSync(store.entrypoint, "- [E](e.md) — d\n")
+    expect(store.save({ fileName: "e", name: "E", description: "d", type: "user", content: "body" }).unchanged).toBe(
+      true,
+    )
+    expect(readFileSync(filePath, "utf-8")).toBe(original)
+  })
 })

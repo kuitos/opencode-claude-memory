@@ -6,7 +6,7 @@
 // Writing the content to a private temp file and hard-linking it into place is atomic: `link(2)`
 // either creates the full file or fails with EEXIST. Filesystems without hard links fall back to `wx`.
 import { randomBytes } from "node:crypto"
-import { linkSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { linkSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 
 function errorCode(error: unknown): string | undefined {
@@ -36,6 +36,24 @@ export function createExclusiveSync(path: string, content: string): boolean {
     } catch {
       // already gone
     }
+  }
+}
+
+// Replaces a file's content atomically (temp file + rename), so a reader such as Claude Code or
+// another plugin sharing the memory folder never sees a half-written file.
+export function writeFileAtomicSync(path: string, content: string): void {
+  mkdirSync(dirname(path), { recursive: true })
+  const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
+  try {
+    writeFileSync(tmp, content, "utf-8")
+    renameSync(tmp, path)
+  } catch (error) {
+    try {
+      unlinkSync(tmp)
+    } catch {
+      // never created
+    }
+    throw error
   }
 }
 
