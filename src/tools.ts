@@ -109,11 +109,14 @@ export function buildMemoryTools(
         file_name: tool.schema.string().describe(`File name of the memory to delete (${FILE_NAME_HINT})`),
       },
       async execute(args) {
-        const deleted = store.delete(args.file_name)
-        return {
-          title: args.file_name,
-          output: deleted ? `Memory "${args.file_name}" deleted.` : `Memory "${args.file_name}" not found.`,
+        const { deleted, trashedTo } = store.delete(args.file_name)
+        let output = `Memory "${args.file_name}" not found.`
+        if (deleted) {
+          output = trashedTo
+            ? `Memory "${args.file_name}" deleted (a copy was kept at ${trashedTo}).`
+            : `Memory "${args.file_name}" deleted.`
         }
+        return { title: args.file_name, output }
       },
     }),
 

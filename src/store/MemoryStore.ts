@@ -1,5 +1,5 @@
-import { mkdirSync, readFileSync, unlinkSync } from "node:fs"
-import { join } from "node:path"
+import { cpSync, mkdirSync, readFileSync, unlinkSync } from "node:fs"
+import { dirname, join } from "node:path"
 import { writeFileAtomicSync } from "../util/exclusiveFile.js"
 import { buildFrontmatter, editFrontmatter, type MemoryType, ORIGIN, parseFrontmatter } from "./frontmatter.js"
 import { buildIndexPointer, indexHasPointer, readIndexFile, removeIndexLine, upsertIndexLine } from "./indexFile.js"
@@ -26,6 +26,12 @@ export type SaveMemoryResult = {
   fileName: string
   // true when the file and its index pointer already held exactly this content, so nothing was written.
   unchanged: boolean
+}
+
+export type DeleteMemoryResult = {
+  deleted: boolean
+  // Where a copy was kept, when the memory was created by another tool.
+  trashedTo?: string
 }
 
 export type ListOptions = {
@@ -119,15 +125,28 @@ export class MemoryStore {
     return { filePath, fileName: relativePath, unchanged: false }
   }
 
-  delete(fileName: string): boolean {
+  // Deleting a memory this plugin did not create (Claude Code's, dsh's, a hand-written one) first
+  // keeps a copy under the plugin's state directory, as dsh-unified-memory does, so an auto-dream
+  // prune can never silently destroy another tool's memory.
+  delete(fileName: string): DeleteMemoryResult {
     const { relativePath, filePath } = resolveMemoryFilePath(this.memoryDir, fileName)
+    const existing = readTextFile(filePath)
+    if (existing === null) return { deleted: false }
+
+    let trashedTo: string | undefined
+    if (parseFrontmatter(existing).frontmatter.origin !== ORIGIN) {
+      const stamp = this.now().toISOString().replace(/[:.]/g, "-")
+      trashedTo = join(this.stateDir, "trash", stamp, relativePath)
+      mkdirSync(dirname(trashedTo), { recursive: true })
+      cpSync(filePath, trashedTo, { preserveTimestamps: true })
+    }
     try {
       unlinkSync(filePath)
     } catch {
-      return false
+      return { deleted: false }
     }
     this.writeIndex(removeIndexLine(this.readIndex(), relativePath))
-    return true
+    return trashedTo ? { deleted: true, trashedTo } : { deleted: true }
   }
 
   search(query: string): MemoryEntry[] {

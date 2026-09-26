@@ -48,7 +48,7 @@ describe("end-to-end memory lifecycle", () => {
     expect(prompt).toContain("## Recalled Memories")
     expect(prompt).toContain("Never mock the database.")
 
-    expect(store.delete("project_freeze")).toBe(true)
+    expect(store.delete("project_freeze").deleted).toBe(true)
     expect(store.list().map((e) => e.name)).not.toContain("Merge Freeze")
     expect(store.readIndex()).not.toContain("project_freeze.md")
   })
