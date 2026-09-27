@@ -1,4 +1,4 @@
-import { cpSync, mkdirSync, readFileSync, unlinkSync } from "node:fs"
+import { cpSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { writeFileAtomicSync } from "../util/exclusiveFile.js"
 import {
@@ -150,16 +150,17 @@ export class MemoryStore {
     return { filePath, fileName: relativePath, unchanged: false }
   }
 
-  // Deleting a memory this plugin did not create (Claude Code's, dsh's, a hand-written one) first
-  // keeps a copy under the plugin's state directory, as dsh-unified-memory does, so an auto-dream
-  // prune can never silently destroy another tool's memory.
+  // Deleting a memory that is not purely this plugin's (Claude Code's, dsh's, a hand-written one, or
+  // one of ours that another tool has since edited) first keeps a copy under the plugin's state
+  // directory, as dsh-unified-memory does, so an auto-dream prune can never silently destroy
+  // another tool's work.
   delete(fileName: string): DeleteMemoryResult {
     const { relativePath, filePath } = resolveMemoryFilePath(this.memoryDir, fileName)
     const existing = readTextFile(filePath)
     if (existing === null) return { deleted: false }
 
     let trashedTo: string | undefined
-    if (parseFrontmatter(existing).frontmatter.origin !== ORIGIN) {
+    if (!isPurelyOwn(existing, filePath)) {
       const stamp = this.now().toISOString().replace(/[:.]/g, "-")
       trashedTo = join(this.stateDir, "trash", stamp, relativePath)
       mkdirSync(dirname(trashedTo), { recursive: true })
@@ -209,6 +210,28 @@ export class MemoryStore {
       (parseMemoryType(frontmatter.type) ?? "user") === input.type &&
       body.replace(/\r\n/g, "\n") === input.content.trim().replace(/\r\n/g, "\n")
     return same && indexHasPointer(this.readIndex(), pointer)
+  }
+}
+
+// How far a file's modification time may trail this plugin's own `modified` stamp (the stamp is
+// taken just before the write) and still count as that write.
+const OWN_WRITE_SLACK_MS = 2_000
+
+// A memory is purely this plugin's when it created it, no other tool has stamped an edit, and the
+// file has not changed since the plugin last wrote it. The last check is what catches Claude Code:
+// it keeps `origin` and stamps nothing when it edits a file, so a modification time well after our
+// `modified` is the only trace of its edit. Any doubt counts as "not ours": an unneeded copy in
+// the trash is harmless, a missing one loses another tool's work.
+function isPurelyOwn(content: string, filePath: string): boolean {
+  const { frontmatter } = parseFrontmatter(content)
+  if (frontmatter.origin !== ORIGIN) return false
+  if (frontmatter.updatedBy !== undefined && frontmatter.updatedBy !== ORIGIN) return false
+  const stamped = Date.parse(frontmatter.modified ?? "")
+  if (Number.isNaN(stamped)) return false
+  try {
+    return statSync(filePath).mtimeMs <= stamped + OWN_WRITE_SLACK_MS
+  } catch {
+    return false
   }
 }
 

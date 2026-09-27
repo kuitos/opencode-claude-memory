@@ -446,9 +446,40 @@ describe("MemoryStore provenance (shared folders)", () => {
 
   test("deleting its own memory removes it without a copy", () => {
     const store = clockStore()
-    store.save({ fileName: "h", name: "H", description: "d", type: "user", content: "x" })
+    const { filePath } = store.save({ fileName: "h", name: "H", description: "d", type: "user", content: "x" })
+    // the store's clock is fixed, so give the file the modification time that clock implies
+    utimesSync(filePath, at, at)
     expect(store.delete("h")).toEqual({ deleted: true })
     expect(existsSync(join(store.stateDir, "trash"))).toBe(false)
+  })
+
+  test("deleting its own memory after another tool stamped an edit keeps a copy", () => {
+    const store = clockStore()
+    const filePath = join(store.memoryDir, "j.md")
+    writeFileSync(
+      filePath,
+      "---\nname: J\ndescription: d\nmetadata:\n  type: user\n  origin: opencode\n  modified: 2026-09-26T12:00:00.000Z\n  updatedBy: dsh\n---\n\nedited by dsh\n",
+    )
+    utimesSync(filePath, at, at)
+    expect(store.delete("j").trashedTo).toBeDefined()
+  })
+
+  test("deleting its own memory after an unstamped edit (Claude Code) keeps a copy", () => {
+    const store = clockStore()
+    const { filePath } = store.save({ fileName: "k", name: "K", description: "d", type: "user", content: "x" })
+    const edited = new Date(at.getTime() + 60 * 60 * 1000)
+    writeFileSync(filePath, readFileSync(filePath, "utf-8").replace("\nx\n", "\nedited by Claude Code\n"))
+    utimesSync(filePath, edited, edited)
+    const { trashedTo } = store.delete("k")
+    expect(trashedTo).toBeDefined()
+    expect(readFileSync(trashedTo as string, "utf-8")).toContain("edited by Claude Code")
+  })
+
+  test("its own memory without a readable modified stamp is treated as another tool's", () => {
+    const store = clockStore()
+    const filePath = join(store.memoryDir, "l.md")
+    writeFileSync(filePath, "---\nname: L\ndescription: d\nmetadata:\n  type: user\n  origin: opencode\n---\n\nx\n")
+    expect(store.delete("l").trashedTo).toBeDefined()
   })
 
   test("a type kept both at the top level and under metadata is updated in both places", () => {
