@@ -7,6 +7,7 @@ import {
   parseFrontmatter,
   parseFrontmatterHeader,
   parseMemoryType,
+  quoteScalar,
 } from "../../src/store/frontmatter.js"
 
 describe("parseFrontmatter", () => {
@@ -140,6 +141,40 @@ describe("editFrontmatter", () => {
   test("gives a file without frontmatter a new block", () => {
     expect(editFrontmatter("just text\n", { set: { name: "N" }, body: "just text" })).toBe(
       "---\nname: N\n---\n\njust text\n",
+    )
+  })
+
+  test("quotes a value YAML would cut at an inline comment", () => {
+    expect(quoteScalar("see PR #37")).toBe('"see PR #37"')
+    expect(quoteScalar("C#")).toBe("C#")
+  })
+
+  test("keeps a double-quoted value that is not a JSON string as written", () => {
+    expect(parseFrontmatter('---\ndescription: "fast" vs "slow" builds\n---\n').frontmatter.description).toBe(
+      '"fast" vs "slow" builds',
+    )
+  })
+
+  test("writes a replaced body with the file's own line endings", () => {
+    const crlf = "---\r\nname: A\r\n---\r\n\r\nold\r\n"
+    expect(editFrontmatter(crlf, { body: "line1\nline2" })).toBe("---\r\nname: A\r\n---\r\n\r\nline1\r\nline2\r\n")
+  })
+
+  test("turns an empty flow-style metadata into a block and leaves a non-empty one alone", () => {
+    expect(editFrontmatter("---\nname: A\nmetadata: {}\n---\n", { setMeta: { updatedBy: "opencode" } })).toBe(
+      "---\nname: A\nmetadata:\n  updatedBy: opencode\n---\n",
+    )
+    const flow = "---\nname: A\nmetadata: {origin: dsh}\n---\n"
+    expect(editFrontmatter(flow, { setMeta: { updatedBy: "opencode" } })).toBe(flow)
+    expect(editFrontmatter(flow, { setWhereExists: { type: "user" } })).toBe(
+      "---\nname: A\nmetadata: {origin: dsh}\ntype: user\n---\n",
+    )
+  })
+
+  test("setWhereExists updates both copies of a key kept at the top level and under metadata", () => {
+    const both = "---\ntype: user\nmetadata: \n  type: user\n---\n"
+    expect(editFrontmatter(both, { setWhereExists: { type: "feedback" } })).toBe(
+      "---\ntype: feedback\nmetadata: \n  type: feedback\n---\n",
     )
   })
 

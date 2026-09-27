@@ -450,4 +450,51 @@ describe("MemoryStore provenance (shared folders)", () => {
     expect(store.delete("h")).toEqual({ deleted: true })
     expect(existsSync(join(store.stateDir, "trash"))).toBe(false)
   })
+
+  test("a type kept both at the top level and under metadata is updated in both places", () => {
+    const store = clockStore()
+    const filePath = join(store.memoryDir, "i.md")
+    writeFileSync(filePath, "---\nname: I\ndescription: d\ntype: user\nmetadata:\n  type: user\n---\n\nbody\n")
+    store.save({ fileName: "i", name: "I", description: "d", type: "feedback", content: "body" })
+    expect(store.read("i")?.type).toBe("feedback")
+    expect(
+      store.save({ fileName: "i", name: "I", description: "d", type: "feedback", content: "body" }).unchanged,
+    ).toBe(true)
+  })
+
+  test("an identical re-save of a file without a type line writes nothing", () => {
+    const store = clockStore()
+    const filePath = join(store.memoryDir, "j.md")
+    const original = "---\nname: J\ndescription: d\n---\n\nbody\n"
+    writeFileSync(filePath, original)
+    writeFileSync(store.entrypoint, "- [J](j.md) — d\n")
+    expect(store.save({ fileName: "j", name: "J", description: "d", type: "user", content: "body" }).unchanged).toBe(
+      true,
+    )
+    expect(readFileSync(filePath, "utf-8")).toBe(original)
+  })
+
+  test("an identical re-save of a CRLF file writes nothing", () => {
+    const store = clockStore()
+    const filePath = join(store.memoryDir, "k.md")
+    const original = "---\r\nname: K\r\ndescription: d\r\ntype: user\r\n---\r\n\r\nline1\r\nline2\r\n"
+    writeFileSync(filePath, original)
+    writeFileSync(store.entrypoint, "- [K](k.md) — d\n")
+    expect(
+      store.save({ fileName: "k", name: "K", description: "d", type: "user", content: "line1\nline2" }).unchanged,
+    ).toBe(true)
+    expect(readFileSync(filePath, "utf-8")).toBe(original)
+  })
+
+  test("refuses an edit that would push the frontmatter past its line limit", () => {
+    const store = clockStore()
+    const filePath = join(store.memoryDir, "l.md")
+    const extra = Array.from({ length: 26 }, (_, i) => `k${i}: v`).join("\n")
+    const original = `---\nname: L\ndescription: d\n${extra}\n---\n\nbody\n`
+    writeFileSync(filePath, original)
+    expect(() => store.save({ fileName: "l", name: "L", description: "d2", type: "user", content: "body" })).toThrow(
+      /frontmatter would exceed/,
+    )
+    expect(readFileSync(filePath, "utf-8")).toBe(original)
+  })
 })

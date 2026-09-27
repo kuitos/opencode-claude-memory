@@ -1,7 +1,16 @@
 import { cpSync, mkdirSync, readFileSync, unlinkSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { writeFileAtomicSync } from "../util/exclusiveFile.js"
-import { buildFrontmatter, editFrontmatter, type MemoryType, ORIGIN, parseFrontmatter } from "./frontmatter.js"
+import {
+  buildFrontmatter,
+  editFrontmatter,
+  FRONTMATTER_MAX_LINES,
+  type MemoryType,
+  ORIGIN,
+  type ParsedMemoryFile,
+  parseFrontmatter,
+  parseMemoryType,
+} from "./frontmatter.js"
 import { buildIndexPointer, indexHasPointer, readIndexFile, removeIndexLine, upsertIndexLine } from "./indexFile.js"
 import {
   ENTRYPOINT_NAME,
@@ -11,7 +20,14 @@ import {
   resolveMemoryFilePath,
   sanitizePath,
 } from "./paths.js"
-import { formatMemoryManifest, type MemoryEntry, type MemoryHeader, readMemoryEntry, scanMemoryFiles } from "./scan.js"
+import {
+  formatMemoryManifest,
+  type MemoryEntry,
+  type MemoryHeader,
+  nameFromFilename,
+  readMemoryEntry,
+  scanMemoryFiles,
+} from "./scan.js"
 
 export type SaveMemoryInput = {
   fileName: string
@@ -105,18 +121,27 @@ export class MemoryStore {
     }
 
     const existing = readTextFile(filePath)
+    const parsed = existing === null ? null : parseFrontmatter(existing)
     const pointer = buildIndexPointer(relativePath, input.name, input.description)
-    if (existing !== null && this.isUnchanged(existing, input, pointer)) {
+    if (parsed !== null && this.isUnchanged(parsed, relativePath, input, pointer)) {
       return { filePath, fileName: relativePath, unchanged: true }
     }
 
     const modified = this.now().toISOString()
     const fileContent =
-      existing === null
+      existing === null || parsed === null
         ? `${buildFrontmatter({ ...input, modified })}\n\n${input.content.trim()}\n`
-        : updatedFileContent(existing, input, modified)
+        : updatedFileContent(existing, parsed, input, modified)
     if (Buffer.byteLength(fileContent, "utf-8") > MAX_MEMORY_FILE_BYTES) {
       throw new Error(`Memory file content exceeds the ${MAX_MEMORY_FILE_BYTES}-byte limit`)
+    }
+    // Line-level edits keep every other frontmatter line, so the block can outgrow the window both
+    // this plugin and Claude Code read it in; refuse rather than write a file they would both
+    // treat as having no frontmatter.
+    if (!parseFrontmatter(fileContent).hasFrontmatter) {
+      throw new Error(
+        `Memory "${relativePath}" frontmatter would exceed ${FRONTMATTER_MAX_LINES} lines; trim its frontmatter first`,
+      )
     }
 
     writeFileAtomicSync(filePath, fileContent)
@@ -169,14 +194,20 @@ export class MemoryStore {
 
   // Unchanged means the same name, description, type and body, whatever else the frontmatter
   // holds, so an identical re-save neither bumps `modified` nor stamps provenance.
-  private isUnchanged(existing: string, input: SaveMemoryInput, pointer: string): boolean {
-    const { frontmatter, body, hasFrontmatter } = parseFrontmatter(existing)
+  private isUnchanged(
+    parsed: ParsedMemoryFile,
+    relativePath: string,
+    input: SaveMemoryInput,
+    pointer: string,
+  ): boolean {
+    const { frontmatter, body, hasFrontmatter } = parsed
     if (!hasFrontmatter) return false
+    // Missing fields compare as the defaults the scanner (and `read()`) reports for them.
     const same =
-      frontmatter.name === input.name &&
-      frontmatter.description === input.description &&
-      frontmatter.type === input.type &&
-      body === input.content.trim()
+      (frontmatter.name ?? nameFromFilename(relativePath)) === input.name &&
+      (frontmatter.description ?? "") === input.description &&
+      (parseMemoryType(frontmatter.type) ?? "user") === input.type &&
+      body.replace(/\r\n/g, "\n") === input.content.trim().replace(/\r\n/g, "\n")
     return same && indexHasPointer(this.readIndex(), pointer)
   }
 }
@@ -190,30 +221,19 @@ function readTextFile(path: string): string | null {
 }
 
 // Updates an existing memory in place: name, description, type and body change, every other
-// frontmatter line is kept. The type and `modified` are written where the file already keeps them
-// (top level in older files, under `metadata:` otherwise), and a file this plugin did not create
-// gains `metadata.updatedBy: opencode` while its own `origin` stays as it was.
-function updatedFileContent(existing: string, input: SaveMemoryInput, modified: string): string {
-  const { frontmatter } = parseFrontmatter(existing)
-  const topLevel = topLevelKeys(existing)
-  const set: Record<string, string> = { name: input.name, description: input.description }
-  const setMeta: Record<string, string> = {}
-  if (topLevel.has("type")) set.type = input.type
-  else setMeta.type = input.type
-  if (topLevel.has("modified")) set.modified = modified
-  else setMeta.modified = modified
-  if (frontmatter.origin !== ORIGIN) setMeta.updatedBy = ORIGIN
-  return editFrontmatter(existing, { set, setMeta, body: input.content })
-}
-
-function topLevelKeys(content: string): Set<string> {
-  const keys = new Set<string>()
-  const lines = content.trimStart().split(/\r?\n/)
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i] ?? ""
-    if (line.trimEnd() === "---") break
-    const match = /^([A-Za-z_][\w-]*):/.exec(line)
-    if (match?.[1]) keys.add(match[1])
-  }
-  return keys
+// frontmatter line is kept. The type and `modified` are written wherever the file already keeps
+// them (top level in older files, under `metadata:` otherwise, both when it has both), and a file
+// this plugin did not create gains `metadata.updatedBy: opencode` while its own `origin` stays.
+function updatedFileContent(
+  existing: string,
+  parsed: ParsedMemoryFile,
+  input: SaveMemoryInput,
+  modified: string,
+): string {
+  return editFrontmatter(existing, {
+    set: { name: input.name, description: input.description },
+    setWhereExists: { type: input.type, modified },
+    setMeta: parsed.frontmatter.origin === ORIGIN ? {} : { updatedBy: ORIGIN },
+    body: input.content,
+  })
 }
