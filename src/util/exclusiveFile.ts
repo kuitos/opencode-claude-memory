@@ -6,7 +6,7 @@
 // Writing the content to a private temp file and hard-linking it into place is atomic: `link(2)`
 // either creates the full file or fails with EEXIST. Filesystems without hard links fall back to `wx`.
 import { randomBytes } from "node:crypto"
-import { linkSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, linkSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { dirname } from "node:path"
 
 function errorCode(error: unknown): string | undefined {
@@ -40,20 +40,75 @@ export function createExclusiveSync(path: string, content: string): boolean {
 }
 
 // Replaces a file's content atomically (temp file + rename), so a reader such as Claude Code or
-// another plugin sharing the memory folder never sees a half-written file.
-export function writeFileAtomicSync(path: string, content: string): void {
-  mkdirSync(dirname(path), { recursive: true })
-  const tmp = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
+// another plugin sharing the memory folder never sees a half-written file. Unlike a bare rename it
+// also keeps what `writeFileSync` kept: a symlinked file (a dotfiles-managed MEMORY.md) stays a link
+// and its target is replaced instead, and the file's permission bits are carried over. When Windows
+// refuses the rename because another process has the file open, it retries briefly and then writes
+// in place, which is not atomic but is what `writeFileSync` did before.
+export function writeFileAtomicSync(
+  path: string,
+  content: string,
+  rename: (from: string, to: string) => void = renameSync,
+): void {
+  const target = resolveWriteTarget(path)
+  mkdirSync(dirname(target), { recursive: true })
+  const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
   try {
     writeFileSync(tmp, content, "utf-8")
-    renameSync(tmp, path)
-  } catch (error) {
+    const mode = existingMode(target)
+    if (mode !== undefined) chmodSync(tmp, mode)
+    renameWithRetry(tmp, target, content, rename)
+  } finally {
     try {
       unlinkSync(tmp)
     } catch {
-      // never created
+      // renamed into place, or never created
     }
+  }
+}
+
+// The file a write should land on: the end of a symlink chain, or the path itself when it does not
+// exist yet. (The memory store has already rejected links that leave the memory directory.)
+function resolveWriteTarget(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return path
     throw error
+  }
+}
+
+function existingMode(path: string): number | undefined {
+  try {
+    return statSync(path).mode & 0o7777
+  } catch {
+    return undefined
+  }
+}
+
+// Codes Windows returns when another process holds the destination open without FILE_SHARE_DELETE.
+const RENAME_BUSY_CODES = new Set(["EPERM", "EBUSY", "EACCES"])
+const RENAME_ATTEMPTS = 5
+
+function renameWithRetry(
+  tmp: string,
+  target: string,
+  content: string,
+  rename: (from: string, to: string) => void,
+): void {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      rename(tmp, target)
+      return
+    } catch (error) {
+      if (!RENAME_BUSY_CODES.has(errorCode(error) ?? "")) throw error
+      if (attempt < RENAME_ATTEMPTS) {
+        sleepSync(2 * attempt)
+        continue
+      }
+      writeFileSync(target, content, "utf-8")
+      return
+    }
   }
 }
 
