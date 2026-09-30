@@ -6,7 +6,17 @@
 // Writing the content to a private temp file and hard-linking it into place is atomic: `link(2)`
 // either creates the full file or fails with EEXIST. Filesystems without hard links fall back to `wx`.
 import { randomBytes } from "node:crypto"
-import { chmodSync, linkSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs"
 import { dirname } from "node:path"
 
 function errorCode(error: unknown): string | undefined {
@@ -40,41 +50,73 @@ export function createExclusiveSync(path: string, content: string): boolean {
 }
 
 // Replaces a file's content atomically (temp file + rename), so a reader such as Claude Code or
-// another plugin sharing the memory folder never sees a half-written file. Unlike a bare rename it
-// also keeps what `writeFileSync` kept: a symlinked file (a dotfiles-managed MEMORY.md) stays a link
-// and its target is replaced instead, and the file's permission bits are carried over. When Windows
-// refuses the rename because another process has the file open, it retries briefly and then writes
-// in place, which is not atomic but is what `writeFileSync` did before.
+// another plugin sharing the memory folder never sees a half-written file. The file's permission
+// bits are carried over, and a symbolic link (a dotfiles-managed MEMORY.md) stays a link: the regular
+// file at the end of its chain is replaced instead. Where a rename cannot do the job it writes in
+// place, which is not atomic but is what `writeFileSync` did before: through a link whose target is
+// missing, is not a regular file or sits in a directory that takes no new files, and, on Windows,
+// over a file another process keeps open. A replaced file is a new inode, so unlike `writeFileSync`
+// it does not keep hard links, owner, ACLs or extended attributes, and write protection on the file
+// itself (rather than on its directory) does not stop it.
+//
+// Callers own containment: the memory store checks memory-file names with `resolveMemoryFilePath`
+// (links must stay inside the memory directory), while MEMORY.md is followed wherever it points.
 export function writeFileAtomicSync(
   path: string,
   content: string,
   rename: (from: string, to: string) => void = renameSync,
 ): void {
-  const target = resolveWriteTarget(path)
-  mkdirSync(dirname(target), { recursive: true })
+  const link = isSymbolicLink(path)
+  const target = link ? replaceableLinkTarget(path) : path
+  if (target === undefined) {
+    writeFileSync(path, content, "utf-8")
+    return
+  }
+  mkdirSync(dirname(path), { recursive: true })
+  const mode = existingMode(target)
   const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
   try {
-    writeFileSync(tmp, content, "utf-8")
-    const mode = existingMode(target)
-    if (mode !== undefined) chmodSync(tmp, mode)
-    renameWithRetry(tmp, target, content, rename)
+    // Created with the target's mode (the umask can only narrow it), so the new content is never
+    // more readable than the file it replaces, not even for a moment.
+    writeFileSync(tmp, content, { encoding: "utf-8", mode })
+  } catch (error) {
+    unlinkWithRetry(tmp)
+    if (!link || !TEMP_REFUSED_CODES.includes(errorCode(error) ?? "")) throw error
+    writeFileSync(path, content, "utf-8")
+    return
+  }
+  let renamed = false
+  try {
+    if (mode !== undefined) restoreMode(tmp, mode)
+    renamed = renameWithRetry(tmp, target, rename)
+    if (!renamed) writeFileSync(target, content, "utf-8")
   } finally {
-    try {
-      unlinkSync(tmp)
-    } catch {
-      // renamed into place, or never created
-    }
+    if (!renamed) unlinkWithRetry(tmp)
   }
 }
 
-// The file a write should land on: the end of a symlink chain, or the path itself when it does not
-// exist yet. (The memory store has already rejected links that leave the memory directory.)
-function resolveWriteTarget(path: string): string {
+// Codes meaning no temp file can be created next to a link's target (a read-only dotfiles directory,
+// /dev): the write then goes through the link instead.
+const TEMP_REFUSED_CODES: readonly string[] = ["EACCES", "EPERM", "EROFS"]
+
+function isSymbolicLink(path: string): boolean {
   try {
-    return realpathSync(path)
+    return lstatSync(path).isSymbolicLink()
+  } catch {
+    return false
+  }
+}
+
+// The regular file at the end of a link's chain, which the rename replaces so the link survives.
+// `undefined` when there is none (a dangling link, a link to a device or a directory, or one Bun
+// cannot resolve, e.g. to an unreadable file): the write then goes through the link, which also
+// creates a missing target as `writeFileSync` did. A looping link is replaced like a plain file.
+function replaceableLinkTarget(path: string): string | undefined {
+  try {
+    const target = realpathSync(path)
+    return statSync(target).isFile() ? target : undefined
   } catch (error) {
-    if (errorCode(error) === "ENOENT") return path
-    throw error
+    return errorCode(error) === "ELOOP" ? path : undefined
   }
 }
 
@@ -86,30 +128,35 @@ function existingMode(path: string): number | undefined {
   }
 }
 
-// Codes Windows returns when another process holds the destination open without FILE_SHARE_DELETE.
-const RENAME_BUSY_CODES = new Set(["EPERM", "EBUSY", "EACCES"])
+// Puts back bits the umask stripped when the temp file was created. Best effort: some mounts (FAT,
+// exFAT or CIFS owned by another user, some FUSE filesystems) refuse chmod, and the file then keeps
+// the mode they give it, as it did before modes were carried over.
+function restoreMode(path: string, mode: number): void {
+  try {
+    chmodSync(path, mode)
+  } catch {
+    // the mount decides the mode
+  }
+}
+
+// Windows refuses to replace a file that another process holds open without FILE_SHARE_DELETE, as
+// EPERM, EBUSY or EACCES, usually for a few milliseconds. Elsewhere these codes are permanent
+// (immutable files, sticky directories, ACLs), so they are thrown at once.
+const RENAME_BUSY_CODES: readonly string[] = ["EPERM", "EBUSY", "EACCES"]
 const RENAME_ATTEMPTS = 5
 
-function renameWithRetry(
-  tmp: string,
-  target: string,
-  content: string,
-  rename: (from: string, to: string) => void,
-): void {
-  for (let attempt = 1; ; attempt++) {
+// False when Windows still refuses after RENAME_ATTEMPTS tries (2, 4, 6 and 8 ms apart).
+function renameWithRetry(tmp: string, target: string, rename: (from: string, to: string) => void): boolean {
+  for (let attempt = 1; attempt <= RENAME_ATTEMPTS; attempt++) {
     try {
       rename(tmp, target)
-      return
+      return true
     } catch (error) {
-      if (!RENAME_BUSY_CODES.has(errorCode(error) ?? "")) throw error
-      if (attempt < RENAME_ATTEMPTS) {
-        sleepSync(2 * attempt)
-        continue
-      }
-      writeFileSync(target, content, "utf-8")
-      return
+      if (process.platform !== "win32" || !RENAME_BUSY_CODES.includes(errorCode(error) ?? "")) throw error
+      if (attempt < RENAME_ATTEMPTS) sleepSync(2 * attempt)
     }
   }
+  return false
 }
 
 export function fileAgeMs(path: string, now: number = Date.now()): number | undefined {

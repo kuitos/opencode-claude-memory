@@ -91,6 +91,24 @@ export function parseFrontmatter(raw: string): ParsedMemoryFile {
   }
 }
 
+// The key of every non-blank frontmatter line, in order and with repeats, which the flat parser
+// above merges away; a line that is not `key: value` (a list item, a comment) yields "". `undefined`
+// when the file has no frontmatter.
+export function frontmatterKeys(raw: string): string[] | undefined {
+  const trimmed = raw.trim()
+  if (!trimmed.startsWith("---")) return undefined
+  const lines = trimmed.split("\n")
+  const closing = findClosingLine(lines)
+  if (closing === -1) return undefined
+  return lines
+    .slice(1, closing)
+    .filter((line) => line.trim() !== "")
+    .map((line) => {
+      const colonIdx = line.indexOf(":")
+      return colonIdx === -1 ? "" : line.slice(0, colonIdx).trim()
+    })
+}
+
 // Header-only variant for the directory scanner: parses the first FRONTMATTER_MAX_LINES lines and
 // never materialises the body. Leading whitespace is dropped before counting lines, exactly as the
 // full parser does, so both entry points agree on every file (leading blank lines included).

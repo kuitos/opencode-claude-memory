@@ -121,7 +121,7 @@ bun run build            # dist/ via tsconfig.build.json
 ## Notes
 
 - Memory directory: `<CLAUDE_CONFIG_DIR>/projects/<sanitizePath(canonicalGitRoot)>/memory/`, shared with Claude Code. `sanitizePath` / `djb2Hash` are exact copies of Claude Code's.
-- Provenance: files this plugin creates carry `metadata.origin: opencode`; edits to other tools' files add `metadata.updatedBy: opencode` and keep every other frontmatter line. Deleting a memory it did not create first copies it to `<stateDir>/trash/<timestamp>/`.
+- Provenance: files this plugin creates carry `metadata.origin: opencode`; edits to other tools' files add `metadata.updatedBy: opencode` and keep every other frontmatter line. Deleting a memory that is not purely its own (another tool's, or its own once another tool has edited it: extra frontmatter keys, or an mtime more than 2 s from its `modified`) first copies it to `<stateDir>/trash/<timestamp>/`.
 - Plugin state: `<CLAUDE_CONFIG_DIR>/opencode-memory/<same key>/extraction-state.json` (+ `extraction-state.lock` around every update, + `maintenance.lock` shared by extraction forks and auto-dream across processes). A v1 `<cksum>.consolidate-lock` is migrated on first catch-up; a v1 shell hook still present in an rc file is reported with a warn log.
 - Agent names are fixed: `opencode-memory-recall`, `opencode-memory-extract`, `opencode-memory-dream`. The `config` hook merges defaults under whatever the user configured.
 - OpenCode dedupes `plugin` entries by package name across global/project config, last one wins — plugin options are not merged across files.
