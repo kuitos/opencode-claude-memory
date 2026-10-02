@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { detectIgnoreMemory, detectResumeMemory, isAutoMemoryPart, stripAutoMemoryParts } from "../src/hooks/ignore.js"
+import {
+  detectIgnoreMemory,
+  detectResumeMemory,
+  isAutoMemoryPart,
+  stripAutoMemoryParts,
+} from "../src/host/v1/ignore.js"
 import {
   buildTurnID,
   collectSurfacedMemoryKeys,
@@ -7,7 +12,7 @@ import {
   extractSurfacedMemoryKeys,
   extractUserQuery,
   getLastUserQuery,
-} from "../src/hooks/messages.js"
+} from "../src/host/v1/messages.js"
 import { AUTO_MEMORY_MARKER } from "../src/prompt/systemPrompt.js"
 import { message, textPart, toolPart, userMessage } from "./helpers/index.js"
 

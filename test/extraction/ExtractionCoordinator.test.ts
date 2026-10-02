@@ -4,7 +4,6 @@ import { join } from "node:path"
 import {
   buildConversationForExtraction,
   EXTRACTION_TITLE,
-  ExtractionCoordinator,
   hasExtractableUserMessage,
   MAX_EXTRACTION_FAILURES,
   sliceNewMessages,
@@ -13,7 +12,8 @@ import {
 import { MaintenanceLock } from "../../src/extraction/lock.js"
 import { EXTRACT_EXISTING_MEMORIES_HEADING } from "../../src/extraction/prompts.js"
 import { ExtractionStateStore } from "../../src/extraction/state.js"
-import type { ChatMessage } from "../../src/sdk.js"
+import { V1ExtractionCoordinator as ExtractionCoordinator } from "../../src/host/v1/coordinators.js"
+import type { ChatMessage } from "../../src/host/v1/sdk.js"
 import { OwnedSessions } from "../../src/util/ownedSessions.js"
 import {
   type ClientCall,

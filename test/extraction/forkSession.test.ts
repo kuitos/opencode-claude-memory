@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { extractSessionID, ForkSessionTimeoutError, runForkSession } from "../../src/extraction/forkSession.js"
+import { extractSessionID, ForkSessionTimeoutError, runForkSession } from "../../src/host/v1/fork.js"
 import { callOptions, deferred, makeSelectorClient, methods } from "../helpers/index.js"
 
 const base = {

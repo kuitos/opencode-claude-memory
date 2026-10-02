@@ -1,6 +1,12 @@
-import { type Hooks, tool } from "@opencode-ai/plugin"
+// The five memory tools, defined once. Each host adapter wraps the specs into its own tool format
+// (V1: `Hooks["tool"]`, V2: `ToolEditor.add`); results carry their own titles.
+//
+// Argument schemas use `zod/v4`: both hosts accept them (V1 duck-types Zod v4 schemas, V2 takes any
+// Standard Schema), so the plugin needs no runtime import from either SDK.
+import { z } from "zod/v4"
+import type { MemoryToolName } from "./agents.js"
 import type { ExtractionCoordinator } from "./extraction/ExtractionCoordinator.js"
-import { MEMORY_TYPES } from "./store/frontmatter.js"
+import { MEMORY_TYPES, type MemoryType } from "./store/frontmatter.js"
 import type { MemoryStore, SaveMemoryResult } from "./store/MemoryStore.js"
 
 // Tool result for memory_save. Inside an extraction fork, `savedThisRun` (file names already saved
@@ -51,14 +57,30 @@ export function memorySearchTitle(query: string, count: number): string {
 
 const FILE_NAME_HINT = 'with or without the .md extension; sub-directories are allowed, e.g. "team/conventions"'
 
-export type MemoryTools = NonNullable<Hooks["tool"]>
+export type MemoryToolResult = { title?: string; output: string }
 
-export function buildMemoryTools(
+export type MemoryToolContext = { sessionID?: string }
+
+export type MemoryToolSpec = {
+  name: MemoryToolName
+  description: string
+  args: z.ZodRawShape
+  // `args` has already been validated against the schema by the host.
+  execute(args: Record<string, unknown>, ctx: MemoryToolContext): Promise<MemoryToolResult>
+}
+
+function str(args: Record<string, unknown>, key: string): string {
+  const value = args[key]
+  return typeof value === "string" ? value : ""
+}
+
+export function buildMemoryToolSpecs(
   store: MemoryStore,
   extraction: Pick<ExtractionCoordinator, "recordSave">,
-): MemoryTools {
-  return {
-    memory_save: tool({
+): MemoryToolSpec[] {
+  return [
+    {
+      name: "memory_save",
       description:
         "Save or update a memory for future conversations. " +
         "Each memory is stored as a markdown file with frontmatter. " +
@@ -67,60 +89,62 @@ export function buildMemoryTools(
         "(user preferences, feedback, project context, external references). " +
         "Check existing memories first with memory_list or memory_search to avoid duplicates.",
       args: {
-        file_name: tool.schema
+        file_name: z
           .string()
           .describe(
             'File name for the memory (without .md extension). Use snake_case, e.g. "user_role", "feedback_testing_style", "project_auth_rewrite"; a sub-directory prefix such as "team/conventions" is allowed',
           ),
-        name: tool.schema.string().describe("Human-readable name for this memory"),
-        description: tool.schema
+        name: z.string().describe("Human-readable name for this memory"),
+        description: z
           .string()
           .describe("One-line description — used to decide relevance in future conversations, so be specific"),
-        type: tool.schema
+        type: z
           .enum(MEMORY_TYPES)
           .describe(
             "Memory type: user (about the person), feedback (guidance on approach), project (ongoing work context), reference (pointers to external systems)",
           ),
-        content: tool.schema
+        content: z
           .string()
           .describe(
             "Memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines",
           ),
       },
       async execute(args, ctx) {
+        const type = str(args, "type") as MemoryType
         const outcome = store.save({
-          fileName: args.file_name,
-          name: args.name,
-          description: args.description,
-          type: args.type,
-          content: args.content,
+          fileName: str(args, "file_name"),
+          name: str(args, "name"),
+          description: str(args, "description"),
+          type,
+          content: str(args, "content"),
         })
-        const savedThisRun = extraction.recordSave(ctx?.sessionID, outcome.fileName)
+        const savedThisRun = extraction.recordSave(ctx.sessionID, outcome.fileName)
         return {
-          title: memorySaveTitle(args.type, args.name),
+          title: memorySaveTitle(type, str(args, "name")),
           output: formatMemorySaveResult(outcome, savedThisRun),
         }
       },
-    }),
-
-    memory_delete: tool({
+    },
+    {
+      name: "memory_delete",
       description: "Delete a memory that is outdated, wrong, or no longer relevant. Also removes it from the index.",
       args: {
-        file_name: tool.schema.string().describe(`File name of the memory to delete (${FILE_NAME_HINT})`),
+        file_name: z.string().describe(`File name of the memory to delete (${FILE_NAME_HINT})`),
       },
       async execute(args) {
-        const { deleted, trashedTo } = store.delete(args.file_name)
-        let output = `Memory "${args.file_name}" not found.`
+        const fileName = str(args, "file_name")
+        const { deleted, trashedTo } = store.delete(fileName)
+        let output = `Memory "${fileName}" not found.`
         if (deleted) {
           output = trashedTo
-            ? `Memory "${args.file_name}" deleted (a copy was kept at ${trashedTo}).`
-            : `Memory "${args.file_name}" deleted.`
+            ? `Memory "${fileName}" deleted (a copy was kept at ${trashedTo}).`
+            : `Memory "${fileName}" deleted.`
         }
-        return { title: args.file_name, output }
+        return { title: fileName, output }
       },
-    }),
-
-    memory_list: tool({
+    },
+    {
+      name: "memory_list",
       description:
         "List all saved memories with their names, types, and descriptions. " +
         "Use this to check what memories exist before saving a new one (to avoid duplicates) " +
@@ -133,40 +157,42 @@ export function buildMemoryTools(
         const lines = entries.map((e) => `- **${e.name}** (${e.type}) [${e.filename}]: ${e.description}`)
         return { title, output: `${entries.length} memories found:\n${lines.join("\n")}` }
       },
-    }),
-
-    memory_search: tool({
+    },
+    {
+      name: "memory_search",
       description:
         "Search memories by keyword. Searches across names, descriptions, and content. " +
         "Use this to find relevant memories before answering questions or when the user references past conversations.",
       args: {
-        query: tool.schema.string().describe("Search query — searches across name, description, and content"),
+        query: z.string().describe("Search query — searches across name, description, and content"),
       },
       async execute(args) {
-        const results = store.search(args.query)
-        const title = memorySearchTitle(args.query, results.length)
-        if (results.length === 0) return { title, output: `No memories matching "${args.query}".` }
+        const query = str(args, "query")
+        const results = store.search(query)
+        const title = memorySearchTitle(query, results.length)
+        if (results.length === 0) return { title, output: `No memories matching "${query}".` }
         const lines = results.map(
           (e) =>
             `- **${e.name}** (${e.type}) [${e.filename}]: ${e.description}\n  Content: ${e.body.slice(0, 200)}${e.body.length > 200 ? "..." : ""}`,
         )
-        return { title, output: `${results.length} matches for "${args.query}":\n${lines.join("\n")}` }
+        return { title, output: `${results.length} matches for "${query}":\n${lines.join("\n")}` }
       },
-    }),
-
-    memory_read: tool({
+    },
+    {
+      name: "memory_read",
       description: "Read the full content of a specific memory file.",
       args: {
-        file_name: tool.schema.string().describe(`File name of the memory to read (${FILE_NAME_HINT})`),
+        file_name: z.string().describe(`File name of the memory to read (${FILE_NAME_HINT})`),
       },
       async execute(args) {
-        const entry = store.read(args.file_name)
-        if (!entry) return { title: args.file_name, output: `Memory "${args.file_name}" not found.` }
+        const fileName = str(args, "file_name")
+        const entry = store.read(fileName)
+        if (!entry) return { title: fileName, output: `Memory "${fileName}" not found.` }
         return {
-          title: args.file_name,
+          title: fileName,
           output: `# ${entry.name}\n**Type:** ${entry.type}\n**Description:** ${entry.description}\n\n${entry.body}`,
         }
       },
-    }),
-  }
+    },
+  ]
 }

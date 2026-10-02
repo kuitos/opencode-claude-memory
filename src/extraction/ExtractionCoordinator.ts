@@ -1,31 +1,33 @@
-// Incremental post-session memory extraction driven by `session.idle`, with a persisted watermark
-// per session and a start-up catch-up for sessions whose idle timer died with the process.
-import type { AgentRegistry } from "../agents.js"
+// Incremental post-session memory extraction driven by the session going idle, with a persisted
+// watermark per session and a start-up catch-up for sessions whose idle timer died with the process.
+// The host adapter translates its events into onSessionIdle / onSessionStatus / onSessionDeleted.
 import type { MemoryConfig } from "../config.js"
-import { roleOf } from "../hooks/messages.js"
-import { type ChatMessage, type OpencodeClient, type PluginEvent, type SessionInfo, unwrapData } from "../sdk.js"
+import { type MemoryHost, SDK_READ_TIMEOUT_MS, type SessionSummary, type TranscriptMessage } from "../host/types.js"
 import type { MemoryStore } from "../store/MemoryStore.js"
 import { findLegacyShellHooks } from "../util/legacyShellHook.js"
 import { getErrorMessage, type Logger } from "../util/log.js"
 import type { OwnedSessions } from "../util/ownedSessions.js"
-import { TimeoutError, withDeadline } from "../util/timeout.js"
+import { TimeoutError } from "../util/timeout.js"
 import { AutoDream } from "./autodream.js"
-import { runForkSession } from "./forkSession.js"
 import { MaintenanceLock } from "./lock.js"
 import { buildExtractionSystemPrompt } from "./prompts.js"
 import { ExtractionStateStore, migrateLegacyAutodreamState, type SessionExtractionState } from "./state.js"
 
+export { SDK_READ_TIMEOUT_MS }
+
 export const EXTRACTION_TITLE = "opencode-memory extraction"
-// Keep the fork in the owned-session guard past delete: its `session.idle` can arrive after the
-// delete HTTP call resolved and would otherwise trigger an extraction of the fork itself.
+// Keep the fork in the owned-session guard past delete: its idle event can arrive after the delete
+// call resolved and would otherwise trigger an extraction of the fork itself.
 export const FORK_GRACE_MS = 60_000
 export const MAX_EXTRACTION_FAILURES = 3
 export const MIN_CONVERSATION_CHARS = 20
-// Deadline for the plain SDK reads (`session.messages`, `session.list`); see util/timeout.ts.
-export const SDK_READ_TIMEOUT_MS = 30_000
 
-function messageTime(message: ChatMessage): { created?: number; completed?: number } {
-  const time = (message.info as { time?: { created?: unknown; completed?: unknown } } | undefined)?.time
+function roleOf(message: TranscriptMessage): string {
+  return String(message.info?.role ?? "")
+}
+
+function messageTime(message: TranscriptMessage): { created?: number; completed?: number } {
+  const time = message.info?.time
   return {
     created: typeof time?.created === "number" ? time.created : undefined,
     completed: typeof time?.completed === "number" ? time.completed : undefined,
@@ -35,10 +37,10 @@ function messageTime(message: ChatMessage): { created?: number; completed?: numb
 // Messages after the watermark. If the watermark message was removed (revert / compaction), fall
 // back to everything created after the watermark message's own time (not the fork's finish time:
 // messages that arrived while the fork ran must not be skipped).
-export function sliceNewMessages(
-  messages: readonly ChatMessage[],
+export function sliceNewMessages<M extends TranscriptMessage>(
+  messages: readonly M[],
   state: SessionExtractionState | undefined,
-): ChatMessage[] {
+): M[] {
   if (!state) return [...messages]
   if (state.lastExtractedMessageID) {
     const idx = messages.findIndex((m) => m.info.id === state.lastExtractedMessageID)
@@ -50,7 +52,7 @@ export function sliceNewMessages(
 
 // Drops assistant messages still being generated from the end of the slice: extracting them would
 // record a watermark past content that is not final yet, and the final answer would never be seen.
-export function trimIncompleteTail(messages: readonly ChatMessage[]): ChatMessage[] {
+export function trimIncompleteTail<M extends TranscriptMessage>(messages: readonly M[]): M[] {
   let end = messages.length
   while (end > 0) {
     const message = messages[end - 1]
@@ -60,29 +62,21 @@ export function trimIncompleteTail(messages: readonly ChatMessage[]): ChatMessag
   return messages.slice(0, end)
 }
 
-export function hasExtractableUserMessage(messages: readonly ChatMessage[]): boolean {
+export function hasExtractableUserMessage(messages: readonly TranscriptMessage[]): boolean {
   return messages.some((message) => {
     if (roleOf(message) !== "user" || !Array.isArray(message.parts)) return false
-    return message.parts.some((part) => {
-      const p = part as { type?: string; text?: string; synthetic?: boolean }
-      return p.type === "text" && typeof p.text === "string" && p.text.trim().length > 0 && !p.synthetic
-    })
+    return message.parts.some(
+      (p) => p.type === "text" && typeof p.text === "string" && p.text.trim().length > 0 && !p.synthetic,
+    )
   })
 }
 
-export function buildConversationForExtraction(messages: readonly ChatMessage[], maxChars: number): string {
+export function buildConversationForExtraction(messages: readonly TranscriptMessage[], maxChars: number): string {
   const lines: string[] = []
   for (const message of messages) {
     const role = roleOf(message)
     if (!role || !Array.isArray(message.parts)) continue
-    for (const part of message.parts) {
-      const p = part as {
-        type?: string
-        text?: string
-        synthetic?: boolean
-        tool?: string
-        state?: { status?: string; output?: string }
-      }
+    for (const p of message.parts) {
       if (p.type === "text" && typeof p.text === "string" && !p.synthetic) {
         lines.push(`### ${role === "user" ? "User" : "Assistant"}\n${p.text}`)
       } else if (p.type === "tool" && p.tool && p.state?.status === "completed" && typeof p.state.output === "string") {
@@ -102,10 +96,8 @@ export function buildConversationForExtraction(messages: readonly ChatMessage[],
 export type ExtractionCoordinatorDeps = {
   store: MemoryStore
   config: MemoryConfig
-  client: OpencodeClient | undefined
-  directory: string
+  host: MemoryHost | undefined
   owned: OwnedSessions
-  agents: AgentRegistry
   log: Logger
   now?: () => number
   state?: ExtractionStateStore
@@ -113,8 +105,8 @@ export type ExtractionCoordinatorDeps = {
 }
 
 type Snapshot = {
-  fresh: ChatMessage[]
-  last: ChatMessage
+  fresh: TranscriptMessage[]
+  last: TranscriptMessage
   lastMessageAt: number | undefined
 }
 
@@ -132,24 +124,17 @@ export class ExtractionCoordinator {
   private caughtUp = false
   private disposed = false
 
-  constructor(private readonly deps: ExtractionCoordinatorDeps) {
+  constructor(protected readonly deps: ExtractionCoordinatorDeps) {
     this.now = deps.now ?? Date.now
     this.state = deps.state ?? new ExtractionStateStore(deps.store.stateDir, this.now)
     this.lock = deps.lock ?? new MaintenanceLock(this.state.lockPath, this.now)
-    this.autodream = deps.client
-      ? new AutoDream({ ...deps, client: deps.client, state: this.state, now: this.now, lock: this.lock })
+    this.autodream = deps.host
+      ? new AutoDream({ ...deps, host: deps.host, state: this.state, now: this.now, lock: this.lock })
       : undefined
   }
 
   get enabled(): boolean {
-    return this.deps.config.extract.enabled && this.deps.client !== undefined
-  }
-
-  onEvent(event: PluginEvent): void {
-    if (event.type === "session.idle") this.onSessionIdle(event.properties.sessionID)
-    else if (event.type === "session.deleted") this.onSessionDeleted(event.properties.info.id)
-    else if (event.type === "session.status")
-      this.onSessionStatus(event.properties.sessionID, event.properties.status.type)
+    return this.deps.config.extract.enabled && this.deps.host !== undefined
   }
 
   onSessionIdle(sessionID: string): void {
@@ -212,8 +197,8 @@ export class ExtractionCoordinator {
   async catchUp(): Promise<void> {
     if (this.caughtUp || !this.enabled) return
     this.caughtUp = true
-    const { client, config, directory, store, log } = this.deps
-    if (!client) return
+    const { host, config, store, log } = this.deps
+    if (!host) return
 
     this.warnLegacyShellHook()
     migrateLegacyAutodreamState(this.state, `${store.claudeConfigDir}/opencode-memory`, [
@@ -223,32 +208,16 @@ export class ExtractionCoordinator {
     ])
 
     if (config.extract.catchUpLimit <= 0) return
-    let sessions: SessionInfo[]
+    let sessions: SessionSummary[] | undefined
     try {
-      sessions =
-        unwrapData<SessionInfo[]>(
-          await withDeadline("session.list", SDK_READ_TIMEOUT_MS, (signal) =>
-            client.session.list({ query: { directory }, signal }),
-          ),
-        ) ?? []
+      sessions = await host.listSessions()
     } catch (error) {
       log("warn", "Extraction catch-up could not list sessions", { error: getErrorMessage(error) })
       return
     }
 
-    const pending = sessions
-      .filter((session) => !session.parentID && !this.deps.owned.has(session.id))
-      .filter((session) => {
-        const known = this.state.getSession(session.id)
-        // Compare against the watermark *message* time, not the fork's finish time: a turn that
-        // completed while the previous fork was running must still be caught up.
-        const boundary = known?.lastMessageAt ?? known?.updatedAt ?? 0
-        return (session.time?.updated ?? 0) > boundary
-      })
-      .sort((a, b) => (b.time?.updated ?? 0) - (a.time?.updated ?? 0))
-      .slice(0, config.extract.catchUpLimit)
-
-    for (const session of pending) await this.enqueue(session.id)
+    const pending = sessions === undefined ? this.knownSessions() : this.updatedSessions(sessions)
+    for (const sessionID of pending.slice(0, config.extract.catchUpLimit)) await this.enqueue(sessionID)
   }
 
   dispose(): void {
@@ -256,6 +225,35 @@ export class ExtractionCoordinator {
     for (const timer of this.timers.values()) clearTimeout(timer)
     this.timers.clear()
     this.busy.clear()
+  }
+
+  // Listed sessions whose last update is newer than their watermark, newest first.
+  private updatedSessions(sessions: readonly SessionSummary[]): string[] {
+    return sessions
+      .filter((session) => !session.parentID && !this.deps.owned.has(session.id))
+      .filter((session) => {
+        const known = this.state.getSession(session.id)
+        // Compare against the watermark *message* time, not the fork's finish time: a turn that
+        // completed while the previous fork was running must still be caught up.
+        const boundary = known?.lastMessageAt ?? known?.updatedAt ?? 0
+        return (session.updatedAt ?? 0) > boundary
+      })
+      .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+      .map((session) => session.id)
+  }
+
+  // Hosts that cannot list sessions: re-check the sessions extraction-state.json knows about, most
+  // recently extracted first. A session without new messages costs one transcript read.
+  private knownSessions(): string[] {
+    const known = this.state.read().sessions
+    return Object.entries(known)
+      .filter(([id]) => !this.deps.owned.has(id))
+      .sort(
+        ([, a], [, b]) =>
+          Math.max(b.lastMessageAt ?? 0, b.attemptedAt ?? 0, b.updatedAt) -
+          Math.max(a.lastMessageAt ?? 0, a.attemptedAt ?? 0, a.updatedAt),
+      )
+      .map(([id]) => id)
   }
 
   private clearTimer(sessionID: string): void {
@@ -288,7 +286,7 @@ export class ExtractionCoordinator {
   }
 
   private snapshot(
-    messages: readonly ChatMessage[],
+    messages: readonly TranscriptMessage[],
     previous: SessionExtractionState | undefined,
   ): Snapshot | undefined {
     const fresh = trimIncompleteTail(sliceNewMessages(messages, previous))
@@ -324,19 +322,26 @@ export class ExtractionCoordinator {
   }
 
   private async runIncremental(sessionID: string): Promise<void> {
-    const { client, config, store, directory, owned, agents, log } = this.deps
-    if (!client || this.disposed || this.inFlight.has(sessionID)) return
+    const { host, config, store, owned, log } = this.deps
+    if (!host || this.disposed || this.inFlight.has(sessionID)) return
     // Re-check at dequeue time: the debounce may have fired just before the session went busy, or
     // the session may have started a new turn while this job waited in the queue.
     if (this.busy.has(sessionID)) return
     this.inFlight.add(sessionID)
 
     try {
-      const response = await withDeadline("session.messages", SDK_READ_TIMEOUT_MS, (signal) =>
-        client.session.messages({ path: { id: sessionID }, query: { directory }, signal }),
+      const { messages, truncated } = await host.readTranscript(
+        sessionID,
+        this.state.getSession(sessionID)?.lastExtractedMessageID,
       )
-      const messages = unwrapData<ChatMessage[]>(response) ?? []
       if (this.busy.has(sessionID)) return
+      if (truncated) {
+        // The host only returns the messages after the last compaction and the watermark message is
+        // gone: extraction continues from the start of what is left, earlier turns are lost.
+        log("warn", "Extraction watermark is no longer in the session context; extracting from its start", {
+          sessionID,
+        })
+      }
       let snapshot = this.snapshot(messages, this.state.getSession(sessionID))
       if (!snapshot) return
 
@@ -374,15 +379,12 @@ export class ExtractionCoordinator {
         }
 
         try {
-          await runForkSession({
-            client,
-            directory,
+          await host.runFork({
             parentSessionID: sessionID,
             title: EXTRACTION_TITLE,
             agent: config.agents.extract,
             system: buildExtractionSystemPrompt(store.manifest()),
-            tools: agents.toolsFor(config.agents.extract),
-            parts: [{ type: "text", text: conversation }],
+            text: conversation,
             timeoutMs: config.extract.timeoutMs,
             onCreated: (forkID) => {
               owned.add(forkID)

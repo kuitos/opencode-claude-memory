@@ -2,10 +2,12 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { Hooks, PluginInput, ToolContext, ToolResult } from "@opencode-ai/plugin"
-import { AgentRegistry } from "../../src/agents.js"
 import { type MemoryConfig, parseConfig } from "../../src/config.js"
+import type { MemoryHost } from "../../src/host/types.js"
+import { AgentRegistry } from "../../src/host/v1/agents.js"
+import { createV1Host } from "../../src/host/v1/host.js"
+import type { ChatMessage, MessagePart, OpencodeClient } from "../../src/host/v1/sdk.js"
 import { createMemoryPlugin } from "../../src/index.js"
-import type { ChatMessage, MessagePart, OpencodeClient } from "../../src/sdk.js"
 import { MemoryStore, type SaveMemoryInput } from "../../src/store/MemoryStore.js"
 import type { Logger } from "../../src/util/log.js"
 import { OwnedSessions } from "../../src/util/ownedSessions.js"
@@ -93,27 +95,44 @@ export function collectingLog(): { log: Logger; entries: Array<{ level: string; 
   return { entries, log: (level, message, extra) => void entries.push({ level, message, extra }) }
 }
 
-export function makeDeps(
-  overrides: {
-    store?: MemoryStore
-    config?: MemoryConfig
-    client?: unknown
-    directory?: string
-    owned?: OwnedSessions
-    agents?: AgentRegistry
-    log?: Logger
-    now?: () => number
-  } = {},
-) {
+type DepsOverrides = {
+  store?: MemoryStore
+  config?: MemoryConfig
+  client?: unknown
+  directory?: string
+  owned?: OwnedSessions
+  agents?: AgentRegistry
+  log?: Logger
+  now?: () => number
+}
+
+type Deps = ReturnType<typeof buildDeps>
+
+// With a client, the deps always carry a host.
+export function makeDeps(overrides: DepsOverrides & { client: object }): Deps & { host: MemoryHost }
+export function makeDeps(overrides?: DepsOverrides): Deps
+export function makeDeps(overrides: DepsOverrides = {}): Deps {
+  return buildDeps(overrides)
+}
+
+function buildDeps(overrides: DepsOverrides) {
   const store = overrides.store ?? makeStore()
   const config = overrides.config ?? makeConfig({}, store.claudeConfigDir)
+  const client = overrides.client as OpencodeClient | undefined
+  const directory = overrides.directory ?? store.memoryRoot
+  const agents = overrides.agents ?? new AgentRegistry(config.agents)
   return {
     store,
     config,
-    client: overrides.client as OpencodeClient | undefined,
-    directory: overrides.directory ?? store.memoryRoot,
+    client,
+    // The coordinators talk to the V1 host built from the mock client, so the recorded client calls
+    // are exactly the SDK traffic the plugin produces.
+    host: (client ? createV1Host({ client, directory, toolsFor: (name) => agents.toolsFor(name) }) : undefined) as
+      | MemoryHost
+      | undefined,
+    directory,
     owned: overrides.owned ?? new OwnedSessions(),
-    agents: overrides.agents ?? new AgentRegistry(config.agents),
+    agents,
     log: overrides.log ?? noopLog,
     now: overrides.now,
   }

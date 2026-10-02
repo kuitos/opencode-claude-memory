@@ -1,13 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { join } from "node:path"
-import {
-  buildSelectorQuery,
-  extractSelectedMemories,
-  RECALL_SELECTOR_TITLE,
-  SELECT_MEMORIES_SYSTEM_PROMPT,
-  selectRelevantMemoryFilenames,
-} from "../../src/recall/selector.js"
-import type { OpencodeClient } from "../../src/sdk.js"
+import type { OpencodeClient } from "../../src/host/v1/sdk.js"
+import { extractSelectedMemories, selectRelevantMemoryFilenames } from "../../src/host/v1/selector.js"
+import { buildSelectorQuery, RECALL_SELECTOR_TITLE, SELECT_MEMORIES_SYSTEM_PROMPT } from "../../src/recall/selector.js"
 import type { MemoryHeader } from "../../src/store/scan.js"
 import { callOptions, deferred, makeSelectorClient, methods } from "../helpers/index.js"
 

@@ -1,4 +1,4 @@
-// Type aliases derived from @opencode-ai/plugin so the rest of the code base never spells out
+// Type aliases derived from @opencode-ai/plugin so the rest of the V1 adapter never spells out
 // hand-written subsets of the SDK client or message shapes (v1 had three such copies).
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 

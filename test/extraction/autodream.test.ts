@@ -65,7 +65,7 @@ describe("AutoDream.maybeRun", () => {
       4242,
       () => true,
     )
-    const dream = new AutoDream({ ...deps, client: selector.client, state, lock })
+    const dream = new AutoDream({ ...deps, state, lock })
     return { dream, state, selector, owned, entries, now, store }
   }
 
