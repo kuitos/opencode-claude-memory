@@ -17,6 +17,7 @@ import {
   ENTRYPOINT_NAME,
   findCanonicalGitRoot,
   findGitRoot,
+  MAX_ENTRYPOINT_BYTES,
   MAX_MEMORY_FILE_BYTES,
   resolveMemoryFilePath,
   sanitizePath,
@@ -149,8 +150,19 @@ export class MemoryStore {
       )
     }
 
+    // The index is injected into every session's context, so its size is a per-save cost, not a
+    // per-file one: MAX_MEMORY_FILE_BYTES bounds one memory, nothing bounded the sum. Decided before
+    // the memory is written, so a refused save leaves neither an orphan file nor a partial index.
+    const nextIndex = upsertIndexLine(this.readIndex(), relativePath, pointer)
+    if (Buffer.byteLength(nextIndex, "utf-8") > MAX_ENTRYPOINT_BYTES) {
+      throw new Error(
+        `${ENTRYPOINT_NAME} would exceed the ${MAX_ENTRYPOINT_BYTES}-byte index limit at ${Buffer.byteLength(nextIndex, "utf-8")} bytes; ` +
+          `trim existing index descriptions, or delete a memory you no longer need, before saving "${input.name}"`,
+      )
+    }
+
     writeFileAtomicSync(filePath, fileContent)
-    this.writeIndex(upsertIndexLine(this.readIndex(), relativePath, pointer))
+    this.writeIndex(nextIndex)
 
     return { filePath, fileName: relativePath, unchanged: false }
   }

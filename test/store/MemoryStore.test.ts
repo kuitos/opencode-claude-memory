@@ -595,3 +595,57 @@ describe("MemoryStore provenance (shared folders)", () => {
     expect(readFileSync(filePath, "utf-8")).toBe(original)
   })
 })
+
+describe("MEMORY.md size budget", () => {
+  test("refuses a save that would push the index over the byte limit, writing nothing", () => {
+    const store = makeStore()
+    const filler = "f".repeat(400)
+    // Fill to the ceiling instead of guessing a count: the index is ~201 bytes a line, so any
+    // hardcoded loop length is a second thing to keep in step with MAX_ENTRYPOINT_BYTES.
+    let refused = 0
+    for (let i = 0; i < 500; i++) {
+      try {
+        store.save({ fileName: `m${i}`, name: `M${i}`, description: filler, type: "user", content: "c" })
+      } catch {
+        refused++
+        break
+      }
+    }
+    expect(refused).toBe(1)
+    const before = store.readIndex()
+    expect(Buffer.byteLength(before, "utf-8")).toBeGreaterThan(paths.MAX_ENTRYPOINT_BYTES * 0.9)
+
+    expect(() =>
+      store.save({ fileName: "overflow", name: "Overflow", description: filler, type: "user", content: "c" }),
+    ).toThrow(/index limit/)
+    // Neither half of the save may land: an orphan .md with no index line is worse than a refusal.
+    expect(store.read("overflow")).toBeNull()
+    expect(store.readIndex()).toBe(before)
+  })
+
+  test("a save under the limit still succeeds after the index is long", () => {
+    const store = makeStore()
+    const filler = "f".repeat(400)
+    for (let i = 0; i < 40; i++) {
+      store.save({ fileName: `m${i}`, name: `M${i}`, description: filler, type: "user", content: "c" })
+    }
+    expect(() =>
+      store.save({ fileName: "last", name: "Last", description: "still fits", type: "user", content: "c" }),
+    ).not.toThrow()
+    expect(store.readIndex()).toContain("(last.md)")
+  })
+
+  test("a long description alone cannot make the index line exceed the char budget", () => {
+    const store = makeStore()
+    store.save({
+      fileName: "wordy",
+      name: "Wordy",
+      description: "w".repeat(4_000),
+      type: "user",
+      content: "c",
+    })
+    for (const line of store.readIndex().split("\n")) {
+      expect(line.length).toBeLessThanOrEqual(paths.MAX_INDEX_LINE_CHARS)
+    }
+  })
+})

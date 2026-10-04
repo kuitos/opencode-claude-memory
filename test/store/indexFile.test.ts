@@ -6,7 +6,7 @@ import {
   truncateEntrypoint,
   upsertIndexLine,
 } from "../../src/store/indexFile.js"
-import { ENTRYPOINT_NAME } from "../../src/store/paths.js"
+import { ENTRYPOINT_NAME, MAX_INDEX_LINE_CHARS } from "../../src/store/paths.js"
 
 const CLAUDE_CODE_INDEX = [
   "# Memory index",
@@ -183,5 +183,56 @@ describe("end-of-file newline (review F9)", () => {
     )
     expect(removeIndexLine(raw, "a.md")).toBe("# Index\nFooter without EOL")
     expect(upsertIndexLine("- [Only](o.md) — o", "n.md", "- [N](n.md) — n")).toBe("- [Only](o.md) — o\n- [N](n.md) — n")
+  })
+})
+
+describe("buildIndexPointer line budget", () => {
+  const descOf = (pointer: string): string => pointer.slice(pointer.indexOf(") — ") + 4)
+
+  test("trims the description so the composed line fits MAX_INDEX_LINE_CHARS", () => {
+    const pointer = buildIndexPointer("feedback_tone.md", "Tone", "d".repeat(500))
+    expect(pointer.length).toBeLessThanOrEqual(MAX_INDEX_LINE_CHARS)
+    expect(pointer.startsWith("- [Tone](feedback_tone.md) — ")).toBe(true)
+    expect(pointer.endsWith("...")).toBe(true)
+  })
+
+  test("leaves a description that already fits untouched", () => {
+    expect(buildIndexPointer("a.md", "N", "short hook")).toBe("- [N](a.md) — short hook")
+  })
+
+  test("budgets the description from the actual prefix, so a longer name buys a shorter description", () => {
+    // Both lines come out at exactly the limit -- that is the point. The name is not free: every
+    // character it grows is a character taken from the description, not added to the line.
+    const desc = "d".repeat(500)
+    const short = buildIndexPointer("a.md", "N", desc)
+    const long = buildIndexPointer("a.md", "N".repeat(120), desc)
+    expect(short.length).toBe(MAX_INDEX_LINE_CHARS)
+    expect(long.length).toBe(MAX_INDEX_LINE_CHARS)
+    // Every character the name grows is one the description gives up.
+    const nameCost = "N".repeat(120).length - "N".length
+    expect(descOf(short).length - descOf(long).length).toBe(nameCost)
+  })
+
+  test("a longer file name also costs description budget", () => {
+    const desc = "d".repeat(500)
+    const shallow = buildIndexPointer("a.md", "N", desc)
+    const nested = buildIndexPointer("team/very/deeply/nested/file.md", "N", desc)
+    expect(nested.length).toBeLessThanOrEqual(MAX_INDEX_LINE_CHARS)
+    expect(descOf(shallow).length - descOf(nested).length).toBe(
+      "team/very/deeply/nested/file.md".length - "a.md".length,
+    )
+  })
+
+  test("sizes the ellipsis inside the budget rather than past it", () => {
+    // A naive `slice(0, budget) + "..."` overruns by exactly the ellipsis.
+    const pointer = buildIndexPointer("a.md", "N", "d".repeat(500))
+    expect(pointer.length).toBe(MAX_INDEX_LINE_CHARS)
+  })
+
+  test("returns the description whole when no description length can fit the line", () => {
+    // The name is what has to shrink; truncating the hook to 3 dots would hide that.
+    const desc = "d".repeat(200)
+    const pointer = buildIndexPointer("a.md", "N".repeat(MAX_INDEX_LINE_CHARS), desc)
+    expect(pointer).toBe(`- [${"N".repeat(MAX_INDEX_LINE_CHARS)}](a.md) — ${desc}`)
   })
 })

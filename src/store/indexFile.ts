@@ -1,7 +1,13 @@
 // MEMORY.md is shared with Claude Code and may be hand-organised (headings, blank-line groups,
 // comments). Edits are therefore line-level: only the pointer line for the target file changes.
 import { readFileSync } from "node:fs"
-import { ENTRYPOINT_NAME, MAX_ENTRYPOINT_BYTES, MAX_ENTRYPOINT_LINES } from "./paths.js"
+import {
+  ENTRYPOINT_NAME,
+  MAX_ENTRYPOINT_BYTES,
+  MAX_ENTRYPOINT_LINES,
+  MAX_INDEX_LINE_CHARS,
+  MIN_INDEX_DESC_CHARS,
+} from "./paths.js"
 
 // Only markdown list items of the form `- [Title](file.md) ...` count as index pointers. The label
 // is matched lazily so titles containing brackets (`[Use [Bun]](x.md)`) resolve to the first
@@ -16,8 +22,29 @@ export function readIndexFile(entrypoint: string): string {
   }
 }
 
+// Sizing first and appending the ellipsis after is how a budget-respecting call still overruns:
+// `budget` has to include the "..." or the line comes out long by exactly the ellipsis.
+function trimTo(text: string, budget: number): string {
+  if (budget <= 0) return ""
+  if (text.length <= budget) return text
+  if (budget <= 3) return ".".repeat(budget)
+  return `${text.slice(0, budget - 3).trimEnd()}...`
+}
+
+// The name and file name are the part of the line that routes a recall; the description is the part
+// that can lose detail. So the budget is whatever the prefix leaves and the description is trimmed to
+// it. When even a floor-length description will not fit, the line is returned whole and unsalvageable
+// by description alone -- the caller sees the over-long line rather than a truncated hook, and the
+// name is the thing that needs shortening.
+function fitDescription(fileName: string, name: string, description: string): string {
+  const prefixLen = `- [${name}](${fileName}) — `.length
+  const avail = MAX_INDEX_LINE_CHARS - prefixLen
+  if (avail < MIN_INDEX_DESC_CHARS) return description
+  return trimTo(description, avail)
+}
+
 export function buildIndexPointer(fileName: string, name: string, description: string): string {
-  return `- [${name}](${fileName}) — ${description}`
+  return `- [${name}](${fileName}) — ${fitDescription(fileName, name, description)}`
 }
 
 export function indexHasPointer(raw: string, pointer: string): boolean {

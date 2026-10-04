@@ -8,6 +8,14 @@ import { dirname, isAbsolute, join, parse, resolve, sep } from "node:path"
 export const ENTRYPOINT_NAME = "MEMORY.md"
 export const MAX_ENTRYPOINT_LINES = 200
 export const MAX_ENTRYPOINT_BYTES = 25_000
+// The index is one line per memory and every line is read by a model, not scrolled by a human.
+// truncateEntrypoint() already tells the reader to keep lines "under ~200 chars", but only when it
+// has to truncate, and by then the long line is written. A pointer whose name and description do
+// not fit is trimmed at build time instead.
+export const MAX_INDEX_LINE_CHARS = 200
+// Below this a description is no longer a hook worth routing on, so the caller is told to shorten
+// the name instead of the plugin emitting a line that reads as an ellipsis.
+export const MIN_INDEX_DESC_CHARS = 28
 
 export const MAX_MEMORY_FILES = 200
 export const MAX_MEMORY_FILE_BYTES = 40_000
