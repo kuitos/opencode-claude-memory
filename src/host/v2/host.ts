@@ -6,12 +6,10 @@
 // - listSessions is unavailable (the plugin API cannot list sessions);
 // - generate is a one-shot `generate.text` call: no system prompt, no structured output, so both
 //   are folded into the prompt and the caller parses the text.
-import { TimeoutError, withTimeout } from "../../util/timeout.js"
+import { withDeadline } from "../../util/timeout.js"
 import { type GenerateInput, type MemoryHost, SDK_READ_TIMEOUT_MS } from "../types.js"
-import { type PermissionRule, runV2Fork, type V2Message, type V2SessionApi } from "./fork.js"
+import { type ModelRef, type PermissionRule, runV2Fork, type V2Message, type V2SessionApi } from "./fork.js"
 import { toTranscript } from "./transcript.js"
-
-type ModelRef = { id: string; providerID: string; variant?: string }
 
 export type V2AgentInfo = { model?: ModelRef; permissions?: readonly PermissionRule[] }
 
@@ -24,14 +22,9 @@ export type V2HostOptions = {
   sandboxFor: (name: string) => PermissionRule[]
 }
 
+// The V2 plugin calls take no AbortSignal; withDeadline only bounds the wait.
 function bounded<T>(what: string, timeoutMs: number, call: () => Promise<T>): Promise<T> {
-  let invoked: Promise<T>
-  try {
-    invoked = Promise.resolve(call())
-  } catch (error) {
-    return Promise.reject(error)
-  }
-  return withTimeout(invoked, timeoutMs, () => new TimeoutError(what, timeoutMs))
+  return withDeadline(what, timeoutMs, () => call())
 }
 
 export function buildGeneratePrompt(input: Pick<GenerateInput, "system" | "text" | "schema">): string {
@@ -70,14 +63,16 @@ export class V2Host implements MemoryHost {
     await this.fork(input)
   }
 
+  // One deadline for the agent lookup and the model call together, so the selector never outlives
+  // the caller's timeout (recall.timeoutMs).
   async generate(input: GenerateInput): Promise<string> {
-    const agent = await this.agent(input.agent)
-    const result = await bounded("generate.text", input.timeoutMs, () =>
-      this.options.generateText({
+    const result = await bounded("generate.text", input.timeoutMs, async () => {
+      const agent = await this.agent(input.agent)
+      return this.options.generateText({
         prompt: buildGeneratePrompt(input),
         ...(agent?.model ? { model: agent.model } : {}),
-      }),
-    )
+      })
+    })
     return typeof result?.text === "string" ? result.text : ""
   }
 

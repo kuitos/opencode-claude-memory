@@ -158,6 +158,18 @@ describe("extractSelectedMemories / buildSelectorQuery", () => {
     ])
   })
 
+  test("ignores reasoning parts when reading the answer", () => {
+    const response = {
+      data: {
+        parts: [
+          { type: "reasoning", text: 'maybe {"selected_memories":["wrong.md"]} or {other}' },
+          { type: "text", text: '{\n  "selected_memories": ["right.md"]\n}' },
+        ],
+      },
+    }
+    expect(extractSelectedMemories(response)).toEqual(["right.md"])
+  })
+
   test("omits the tools section when no tools were used", () => {
     expect(buildSelectorQuery("q", [], [])).toBe("Query: q\n\nAvailable memories:\n")
   })

@@ -188,11 +188,24 @@ describe("V2 setup: hooks", () => {
     expect(prompts[0]).toContain("selected_memories")
     expect(event.system[0]?.text).toContain("Blue-green, never on Friday afternoons")
 
-    // The same memory is not recalled twice in the session.
+    // The next model request of the same turn (after a tool call) still sees it: V2 rebuilds the
+    // system prompt for every request.
+    const step = { sessionID: "ses_r", system: [] as Array<{ text: string }> }
+    await runHook(mock, "context", step)
+    expect(step.system[0]?.text).toContain("Blue-green, never on Friday afternoons")
+
+    // The same memory is not selected twice in the session, but stays in the prompt.
     await runHook(mock, "prompt", { sessionID: "ses_r", messageID: "msg_2", prompt: { text: "and the rollback?" } })
     const again = { sessionID: "ses_r", system: [] as Array<{ text: string }> }
     await runHook(mock, "context", again)
     expect(prompts).toHaveLength(1)
+    expect(again.system[0]?.text).toContain("Blue-green, never on Friday afternoons")
+
+    // Once the user asks to ignore memory, recalled memories leave the prompt too.
+    await runHook(mock, "prompt", { sessionID: "ses_r", messageID: "msg_3", prompt: { text: "ignore memory please" } })
+    const ignored = { sessionID: "ses_r", system: [] as Array<{ text: string }> }
+    await runHook(mock, "context", ignored)
+    expect(ignored.system[0]?.text).not.toContain("Blue-green, never on Friday afternoons")
     await cleanup()
   })
 
@@ -332,6 +345,29 @@ describe("V2 setup: extraction", () => {
 })
 
 describe("V2 setup: cleanup", () => {
+  test("a failed registration disposes the ones that succeeded and fails the setup", async () => {
+    const mock = makeV2Context()
+    const ctx = mock.ctx as unknown as { tool: { transform: () => Promise<never> } }
+    ctx.tool.transform = async () => {
+      throw new Error("tool registry unavailable")
+    }
+    await expect(setupV2(mock)).rejects.toThrow("tool registry unavailable")
+    expect(mock.disposed).toEqual(["agent.transform"])
+  })
+
+  test("a deleted session is dropped from extraction-state.json and not caught up again", async () => {
+    const mock = makeV2Context({ options: FAST })
+    const claudeConfigDir = tempDir("ocm-v2-claude-")
+    const state = new ExtractionStateStore(storeFor(mock.directory, claudeConfigDir).stateDir)
+    state.update((data) => {
+      data.sessions.ses_gone = { lastExtractedMessageID: "msg_1", lastMessageAt: 1, updatedAt: Date.now(), failures: 0 }
+    })
+    const { cleanup } = await setupV2(mock, claudeConfigDir)
+    mock.emit({ type: "session.deleted", data: { sessionID: "ses_gone" } })
+    await waitFor(() => state.getSession("ses_gone") === undefined)
+    await cleanup()
+  })
+
   test("⑨ cleanup aborts the event subscription and disposes the registrations", async () => {
     const mock = makeV2Context()
     const { cleanup } = await setupV2(mock)

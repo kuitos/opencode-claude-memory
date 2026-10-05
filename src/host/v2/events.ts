@@ -6,7 +6,10 @@
 // context hooks. Turn boundaries: `session.execution.started` = busy, `succeeded` / `failed` /
 // `interrupted` = idle. The deprecated `session.status` / `session.idle` events are honoured too.
 import type { ExtractionCoordinator } from "../../extraction/ExtractionCoordinator.js"
-import type { RecallCoordinator } from "../../recall/RecallCoordinator.js"
+import type { RecalledMemory } from "../../recall/format.js"
+import { type RecallCoordinator, SESSION_STATE_TTL_MS } from "../../recall/RecallCoordinator.js"
+import type { MemoryType } from "../../store/frontmatter.js"
+import { surfaceKey } from "../../store/scan.js"
 import type { OwnedSessions } from "../../util/ownedSessions.js"
 
 export type V2Event = {
@@ -27,18 +30,29 @@ export type V2EventDeps = {
   owned: OwnedSessions
   recall: Pick<RecallCoordinator, "forget">
   extraction: Pick<ExtractionCoordinator, "onSessionIdle" | "onSessionStatus" | "onSessionDeleted">
+  now?: () => number
 }
 
 export class V2SessionEvents {
-  private readonly sessions = new Set<string>()
-  // Keys (`surfaceKey`) of memories already shown per session: V2 rebuilds the system prompt for every
-  // model request and does not keep it in the history, so it cannot be read back from messages.
-  private readonly surfaced = new Map<string, Set<string>>()
+  // Tracked sessions → last time a hook or event saw them. Entries idle for longer than
+  // SESSION_STATE_TTL_MS are evicted so a long-running server does not leak; the next prompt or
+  // context hook tracks the session again.
+  private readonly sessions = new Map<string, number>()
+  // Memories recalled per session, keyed by `surfaceKey`. V2 rebuilds the system prompt for every
+  // model request and does not keep it in the history, so the recalled section is re-injected on
+  // every request (not only the first one of a turn) and its keys are what the selector skips.
+  private readonly recalled = new Map<string, Map<string, RecalledMemory>>()
+  private readonly now: () => number
 
-  constructor(private readonly deps: V2EventDeps) {}
+  constructor(private readonly deps: V2EventDeps) {
+    this.now = deps.now ?? Date.now
+  }
 
   track(sessionID: string): void {
-    if (!this.deps.owned.has(sessionID)) this.sessions.add(sessionID)
+    if (this.deps.owned.has(sessionID)) return
+    const now = this.now()
+    this.evictStale(now)
+    this.sessions.set(sessionID, now)
   }
 
   isTracked(sessionID: string): boolean {
@@ -46,16 +60,29 @@ export class V2SessionEvents {
   }
 
   surfacedKeys(sessionID: string): ReadonlySet<string> {
-    return this.surfaced.get(sessionID) ?? new Set()
+    return new Set(this.recalled.get(sessionID)?.keys() ?? [])
   }
 
-  markSurfaced(sessionID: string, keys: Iterable<string>): void {
-    let set = this.surfaced.get(sessionID)
-    if (!set) {
-      set = new Set()
-      this.surfaced.set(sessionID, set)
+  // Adds the memories recalled for this request and returns everything recalled so far in the session.
+  remember(sessionID: string, memories: readonly RecalledMemory[]): RecalledMemory[] {
+    let session = this.recalled.get(sessionID)
+    if (!session && memories.length > 0) {
+      session = new Map()
+      this.recalled.set(sessionID, session)
     }
-    for (const key of keys) set.add(key)
+    for (const memory of memories) {
+      session?.set(surfaceKey({ name: memory.name, type: memory.type as MemoryType }), memory)
+    }
+    return [...(session?.values() ?? [])]
+  }
+
+  private evictStale(now: number): void {
+    const cutoff = now - SESSION_STATE_TTL_MS
+    for (const [id, seenAt] of this.sessions) {
+      if (seenAt >= cutoff) continue
+      this.sessions.delete(id)
+      this.recalled.delete(id)
+    }
   }
 
   handle(event: V2Event): void {
@@ -76,6 +103,7 @@ export class V2SessionEvents {
       return
     }
     if (this.deps.owned.has(sessionID) || !this.sessions.has(sessionID)) return
+    this.sessions.set(sessionID, this.now())
 
     if (type === "session.execution.started") {
       this.deps.extraction.onSessionStatus(sessionID, "busy")
@@ -90,7 +118,7 @@ export class V2SessionEvents {
 
   private forget(sessionID: string): void {
     this.sessions.delete(sessionID)
-    this.surfaced.delete(sessionID)
+    this.recalled.delete(sessionID)
     this.deps.recall.forget(sessionID)
     this.deps.extraction.onSessionDeleted(sessionID)
   }

@@ -10,14 +10,12 @@ import { ExtractionCoordinator } from "../../extraction/ExtractionCoordinator.js
 import { buildMemorySystemPrompt } from "../../prompt/systemPrompt.js"
 import { formatRecalledMemories } from "../../recall/format.js"
 import { RecallCoordinator } from "../../recall/RecallCoordinator.js"
-import type { MemoryType } from "../../store/frontmatter.js"
 import { MemoryStore } from "../../store/MemoryStore.js"
 import { resolveMemoryRoot } from "../../store/paths.js"
-import { surfaceKey } from "../../store/scan.js"
 import { buildMemoryToolSpecs, type MemoryToolSpec } from "../../tools.js"
 import { getErrorMessage } from "../../util/log.js"
 import { OwnedSessions } from "../../util/ownedSessions.js"
-import { TimeoutError, withTimeout } from "../../util/timeout.js"
+import { withDeadline } from "../../util/timeout.js"
 import { applyMemoryAgents, type PermissionRule, sandboxRules } from "./agents.js"
 import { consumeEvents, V2SessionEvents } from "./events.js"
 import type { V2SessionApi } from "./fork.js"
@@ -33,14 +31,9 @@ export const CLEANUP_CALL_TIMEOUT_MS = 5_000
 
 type Registration = { dispose: () => Promise<void> }
 
+// The V2 plugin calls take no AbortSignal; withDeadline only bounds the wait.
 function bounded<T>(what: string, timeoutMs: number, call: () => Promise<T>): Promise<T> {
-  let invoked: Promise<T>
-  try {
-    invoked = Promise.resolve(call())
-  } catch (error) {
-    return Promise.reject(error)
-  }
-  return withTimeout(invoked, timeoutMs, () => new TimeoutError(what, timeoutMs))
+  return withDeadline(what, timeoutMs, () => call())
 }
 
 // `codemode: false` exposes the tool to the model under its own name (and permission action);
@@ -87,60 +80,80 @@ export const createV2Setup =
     const register = async (what: string, call: () => Promise<Registration>) => {
       registrations.push(await bounded(what, SETUP_CALL_TIMEOUT_MS, call))
     }
-
-    await register("agent.transform", () => ctx.agent.transform((editor) => applyMemoryAgents(editor, config.agents)))
-
-    await register("tool.transform", () =>
-      ctx.tool.transform((editor) => {
-        for (const spec of buildMemoryToolSpecs(store, extraction)) {
-          editor.add(toV2Tool(spec) as unknown as Parameters<typeof editor.add>[0])
+    const disposeRegistrations = async () => {
+      for (const registration of registrations.splice(0).reverse()) {
+        try {
+          await bounded("registration.dispose", CLEANUP_CALL_TIMEOUT_MS, () => registration.dispose())
+        } catch {
+          // the host tears the plugin scope down anyway
         }
-      }),
-    )
+      }
+    }
 
-    // Before the prompt is admitted: start the recall selector for this turn.
-    await register("session.hook(prompt)", () =>
-      ctx.session.hook("prompt", (event) => {
-        const { sessionID } = event
-        if (owned.has(sessionID) || host.systemFor(sessionID) !== undefined) return
-        events.track(sessionID)
-        const text = (event.prompt as { text?: unknown } | undefined)?.text
-        recall.onTurn({
-          sessionID,
-          turnID: event.messageID,
-          query: typeof text === "string" ? text : undefined,
-          // Prompts reach the plugin one by one; there is no history to replay here.
-          ignoredInHistory: () => false,
-          surfaced: () => events.surfacedKeys(sessionID),
-          recentTools: () => [],
-        })
-      }),
-    )
+    const registerHooks = async (): Promise<void> => {
+      await register("agent.transform", () => ctx.agent.transform((editor) => applyMemoryAgents(editor, config.agents)))
 
-    // Before every model request: the fork's own system prompt, or the memory prompt.
-    await register("session.hook(context)", () =>
-      ctx.session.hook("context", async (event) => {
-        const { sessionID } = event
-        const forkSystem = host.systemFor(sessionID)
-        if (forkSystem !== undefined) {
-          event.system.push({ type: "text", text: forkSystem } as (typeof event.system)[number])
-          return
-        }
-        if (owned.has(sessionID)) return
-        events.track(sessionID)
-        const recalled = await recall.takeRecalled(sessionID)
-        if (recalled.length > 0) {
-          events.markSurfaced(
+      await register("tool.transform", () =>
+        ctx.tool.transform((editor) => {
+          for (const spec of buildMemoryToolSpecs(store, extraction)) {
+            editor.add(toV2Tool(spec) as unknown as Parameters<typeof editor.add>[0])
+          }
+        }),
+      )
+
+      // Before the prompt is admitted: start the recall selector for this turn.
+      await register("session.hook(prompt)", () =>
+        ctx.session.hook("prompt", (event) => {
+          const { sessionID } = event
+          if (owned.has(sessionID) || host.systemFor(sessionID) !== undefined) return
+          events.track(sessionID)
+          const text = (event.prompt as { text?: unknown } | undefined)?.text
+          recall.onTurn({
             sessionID,
-            recalled.map((memory) => surfaceKey({ name: memory.name, type: memory.type as MemoryType })),
-          )
-        }
-        const text = buildMemorySystemPrompt(store, formatRecalledMemories(recalled), {
-          includeIndex: !recall.isIgnored(sessionID),
-        })
-        event.system.push({ type: "text", text } as (typeof event.system)[number])
-      }),
-    )
+            turnID: event.messageID,
+            query: typeof text === "string" ? text : undefined,
+            // Prompts reach the plugin one by one; there is no history to replay here.
+            ignoredInHistory: () => false,
+            surfaced: () => events.surfacedKeys(sessionID),
+            recentTools: () => [],
+          })
+        }),
+      )
+
+      // Before every model request: the fork's own system prompt, or the memory prompt.
+      await register("session.hook(context)", () =>
+        ctx.session.hook("context", async (event) => {
+          const { sessionID } = event
+          const forkSystem = host.systemFor(sessionID)
+          if (forkSystem !== undefined) {
+            event.system.push({ type: "text", text: forkSystem } as (typeof event.system)[number])
+            return
+          }
+          if (owned.has(sessionID)) return
+          events.track(sessionID)
+          // Everything recalled in this session so far, not only this turn's selection: the system
+          // prompt is rebuilt for every request, so a memory shown once would otherwise vanish after
+          // the first tool call while the selector keeps skipping it as already surfaced.
+          const recalled = events.remember(sessionID, await recall.takeRecalled(sessionID))
+          const ignored = recall.isIgnored(sessionID)
+          const text = buildMemorySystemPrompt(store, ignored ? "" : formatRecalledMemories(recalled), {
+            includeIndex: !ignored,
+          })
+          event.system.push({ type: "text", text } as (typeof event.system)[number])
+        }),
+      )
+    }
+
+    try {
+      await registerHooks()
+    } catch (error) {
+      // A registration that failed or timed out fails the whole setup: undo the ones that succeeded
+      // so the host is not left with hidden agents or hooks of a plugin it reports as failed.
+      extraction.dispose()
+      owned.dispose()
+      await disposeRegistrations()
+      throw error
+    }
 
     const abort = new AbortController()
     const consuming = consumeEvents(
@@ -158,13 +171,7 @@ export const createV2Setup =
       abort.abort()
       extraction.dispose()
       owned.dispose()
-      for (const registration of registrations.reverse()) {
-        try {
-          await bounded("registration.dispose", CLEANUP_CALL_TIMEOUT_MS, () => registration.dispose())
-        } catch {
-          // the host tears the plugin scope down anyway
-        }
-      }
+      await disposeRegistrations()
       try {
         await bounded("event stream", CLEANUP_CALL_TIMEOUT_MS, () => consuming)
       } catch {

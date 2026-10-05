@@ -6,7 +6,7 @@
 // The plugin-facing session API takes no AbortSignal, so every call is bounded with withTimeout; a
 // hung host call must never pin the extraction queue or the maintenance lock.
 
-import { TimeoutError, withTimeout } from "../../util/timeout.js"
+import { TimeoutError, withDeadline } from "../../util/timeout.js"
 import type { ForkInput } from "../types.js"
 
 export const FORK_CREATE_TIMEOUT_MS = 30_000
@@ -17,7 +17,7 @@ export const FORK_SETTLE_POLL_MS = 250
 
 export type PermissionRule = { action: string; resource: string; effect: "allow" | "deny" | "ask" }
 
-type ModelRef = { id: string; providerID: string; variant?: string }
+export type ModelRef = { id: string; providerID: string; variant?: string }
 
 // The subset of V2 messages the fork reads back (SessionMessageInfo union).
 export type V2Message = {
@@ -84,14 +84,9 @@ function describeError(error: unknown): string {
   return String(error)
 }
 
+// The V2 session API takes no AbortSignal; withDeadline only bounds the wait.
 function deadline<T>(what: string, timeoutMs: number, call: () => Promise<T>): Promise<T> {
-  let invoked: Promise<T>
-  try {
-    invoked = Promise.resolve(call())
-  } catch (error) {
-    return Promise.reject(error)
-  }
-  return withTimeout(invoked, timeoutMs, () => new TimeoutError(what, timeoutMs))
+  return withDeadline(what, timeoutMs, () => call())
 }
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))

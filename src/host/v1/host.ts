@@ -19,7 +19,13 @@ export function forkAnswerText(response: unknown): string {
   const structured = data.info?.structured
   if (structured && typeof structured === "object") return JSON.stringify(structured)
   if (!Array.isArray(data.parts)) return ""
+  // Answer text only: reasoning parts carry text too, and their prose (or a JSON-looking line in it)
+  // must not be parsed as the selection.
   return data.parts
+    .filter((part) => {
+      const type = part && typeof part === "object" ? (part as { type?: unknown }).type : undefined
+      return type === undefined || type === "text"
+    })
     .map((part) => (part && typeof part === "object" ? (part as { text?: unknown }).text : undefined))
     .filter((text): text is string => typeof text === "string")
     .join("\n")

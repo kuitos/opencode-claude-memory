@@ -166,6 +166,16 @@ export class ExtractionCoordinator {
     this.clearTimer(sessionID)
     this.busy.delete(sessionID)
     this.savedByMainAgent.delete(sessionID)
+    // A deleted session never needs catching up: hosts that cannot list sessions (V2) would otherwise
+    // keep spending catch-up slots and a failing transcript read on it until the 30-day prune.
+    if (!this.state.getSession(sessionID)) return
+    try {
+      this.state.update((data) => {
+        delete data.sessions[sessionID]
+      })
+    } catch {
+      // best-effort: the entry is pruned with the session TTL anyway
+    }
   }
 
   // memory_save reports every write. Inside an extraction fork the list of files saved so far is

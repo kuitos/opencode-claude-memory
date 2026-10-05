@@ -11,8 +11,9 @@
 import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import { type MemoryAgentDefaults, memoryAgentDefaults } from "../../agents.js"
 import type { MemoryAgents } from "../../config.js"
+import type { PermissionRule } from "./fork.js"
 
-export type PermissionRule = { action: string; resource: string; effect: "allow" | "deny" | "ask" }
+export type { PermissionRule }
 
 // A throwaway id used to read the host's default ruleset inside the same draft.
 export const BASELINE_PROBE_AGENT = "opencode-memory-baseline-probe"
