@@ -1,11 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import {
-  buildMemoryTools,
-  formatMemorySaveResult,
-  memoryListTitle,
-  memorySaveTitle,
-  memorySearchTitle,
-} from "../src/tools.js"
+import { buildMemoryTools } from "../src/host/v1/tools.js"
+import { formatMemorySaveResult, memoryListTitle, memorySaveTitle, memorySearchTitle } from "../src/tools.js"
 import { cleanupTempDirs, makeStore, resultOutput, resultTitle, toolCtx } from "./helpers/index.js"
 
 afterEach(cleanupTempDirs)

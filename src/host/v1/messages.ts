@@ -1,6 +1,8 @@
-// Pure helpers over the SDK message shape passed to `experimental.chat.messages.transform`.
-import { RECALLED_MEMORIES_HEADING } from "../prompt/systemPrompt.js"
-import type { ChatMessage, MessagePart } from "../sdk.js"
+// Pure helpers over the V1 SDK message shape passed to `experimental.chat.messages.transform`.
+import { extractSurfacedMemoryKeys } from "../../recall/turn.js"
+import type { ChatMessage, MessagePart } from "./sdk.js"
+
+export { extractSurfacedMemoryKeys }
 
 export type TurnInfo = {
   sessionID?: string
@@ -51,22 +53,6 @@ export function getLastUserQuery(messages: readonly ChatMessage[]): TurnInfo {
 // One user turn may drive several LLM calls (tool loops); they share a turn ID so recall runs once.
 export function buildTurnID(sessionID: string, turn: TurnInfo): string {
   return `${sessionID}:${turn.messageID ?? `${turn.messageIndex ?? -1}:${turn.query ?? ""}`}`
-}
-
-// Parses "### <name> (<type>)" headers from the ## Recalled Memories section
-// of system prompts. After compaction old system messages disappear, so
-// the returned set naturally shrinks — no manual reset needed.
-export function extractSurfacedMemoryKeys(systemText: string): Set<string> {
-  const keys = new Set<string>()
-  const recalledSection = systemText.indexOf(RECALLED_MEMORIES_HEADING)
-  if (recalledSection === -1) return keys
-
-  const headerPattern = /^### (.+?) \((\w+)\)/gm
-  const section = systemText.slice(recalledSection)
-  for (let match = headerPattern.exec(section); match !== null; match = headerPattern.exec(section)) {
-    keys.add(`${match[1]}|${match[2]}`)
-  }
-  return keys
 }
 
 export function collectSurfacedMemoryKeys(messages: readonly ChatMessage[]): Set<string> {

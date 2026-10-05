@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import type { OpencodeClient } from "../../src/sdk.js"
-import { createLogger, LOG_SERVICE } from "../../src/util/log.js"
+import { createLogger, LOG_SERVICE } from "../../src/host/v1/log.js"
+import type { OpencodeClient } from "../../src/host/v1/sdk.js"
 
 describe("createLogger", () => {
   test("forwards to client.app.log with the service name", async () => {

@@ -1,12 +1,10 @@
 // Auto-dream: periodic memory consolidation, gated on time since the last pass and on the number of
 // sessions extracted since then. Port of the v1 bash wrapper's gate and lock semantics.
-import type { AgentRegistry } from "../agents.js"
 import type { MemoryConfig } from "../config.js"
-import type { OpencodeClient } from "../sdk.js"
+import type { MemoryHost } from "../host/types.js"
 import type { MemoryStore } from "../store/MemoryStore.js"
 import { getErrorMessage, type Logger } from "../util/log.js"
 import type { OwnedSessions } from "../util/ownedSessions.js"
-import { runForkSession } from "./forkSession.js"
 import { MaintenanceLock } from "./lock.js"
 import { AUTODREAM_PROMPT, AUTODREAM_USER_MESSAGE } from "./prompts.js"
 import type { AutodreamState, ExtractionStateStore } from "./state.js"
@@ -25,11 +23,9 @@ export function shouldRunAutodream(state: AutodreamState, gate: AutodreamGate, n
 export type AutoDreamDeps = {
   store: MemoryStore
   config: MemoryConfig
-  client: OpencodeClient
-  directory: string
+  host: MemoryHost
   state: ExtractionStateStore
   owned: OwnedSessions
-  agents: AgentRegistry
   log: Logger
   now?: () => number
   lock?: MaintenanceLock
@@ -64,7 +60,7 @@ export class AutoDream {
       return false
     }
 
-    const { client, config, directory, owned, agents, state, log } = this.deps
+    const { host, config, owned, state, log } = this.deps
     try {
       // Re-check under the lock: another process may have consolidated while we waited to acquire.
       if (!this.shouldRun()) return false
@@ -73,15 +69,12 @@ export class AutoDream {
         sessionsSince: autodream.sessionsSince.length,
         lastConsolidatedAt: autodream.lastConsolidatedAt,
       })
-      await runForkSession({
-        client,
-        directory,
+      await host.runFork({
         parentSessionID,
         title: AUTODREAM_TITLE,
         agent: config.agents.dream,
         system: AUTODREAM_PROMPT,
-        tools: agents.toolsFor(config.agents.dream),
-        parts: [{ type: "text", text: AUTODREAM_USER_MESSAGE }],
+        text: AUTODREAM_USER_MESSAGE,
         timeoutMs: config.autodream.timeoutMs,
         onCreated: (id) => owned.add(id),
         onFinished: (id) => owned.release(id, AUTODREAM_FORK_GRACE_MS),

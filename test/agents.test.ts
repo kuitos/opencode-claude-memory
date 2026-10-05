@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test"
-import { AgentRegistry, buildAgentDefaults, mergeAgentConfig } from "../src/agents.js"
 import { MEMORY_AGENTS } from "../src/config.js"
 import { AUTODREAM_PROMPT, EXTRACT_PROMPT } from "../src/extraction/prompts.js"
-import type { PluginConfig } from "../src/sdk.js"
+import { AgentRegistry, buildAgentDefaults, mergeAgentConfig } from "../src/host/v1/agents.js"
+import type { PluginConfig } from "../src/host/v1/sdk.js"
 
 describe("agent defaults", () => {
   test("registers three hidden agents sandboxed to memory tools", () => {

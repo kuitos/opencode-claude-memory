@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { V1RecallCoordinator as RecallCoordinator } from "../../src/host/v1/coordinators.js"
+import type { ChatMessage } from "../../src/host/v1/sdk.js"
 import { AUTO_MEMORY_MARKER } from "../../src/prompt/systemPrompt.js"
-import { RecallCoordinator, SESSION_STATE_TTL_MS } from "../../src/recall/RecallCoordinator.js"
-import type { ChatMessage } from "../../src/sdk.js"
+import { SESSION_STATE_TTL_MS } from "../../src/recall/RecallCoordinator.js"
 import { OwnedSessions } from "../../src/util/ownedSessions.js"
 import {
   cleanupTempDirs,

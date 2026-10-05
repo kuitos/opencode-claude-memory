@@ -4,13 +4,14 @@
 // Every stage has its own deadline and AbortSignal: the SDK client disables fetch timeouts, so a
 // hung `create`, `abort` or `delete` would otherwise pin the caller (and with it the extraction
 // queue and the maintenance lock) forever. `onFinished` always fires, even when cleanup timed out.
-import { type OpencodeClient, unwrapData } from "../sdk.js"
-import { TimeoutError, withDeadline } from "../util/timeout.js"
+import { TimeoutError, withDeadline } from "../../util/timeout.js"
+import type { ForkCleanupStage } from "../types.js"
+import { type OpencodeClient, unwrapData } from "./sdk.js"
 
 export const FORK_CREATE_TIMEOUT_MS = 30_000
 export const FORK_CLEANUP_TIMEOUT_MS = 15_000
 
-export type ForkCleanupStage = "abort" | "delete"
+export type { ForkCleanupStage }
 
 export type ForkSessionInput = {
   client: OpencodeClient

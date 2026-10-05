@@ -3,9 +3,17 @@ import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import type { PluginInput } from "@opencode-ai/plugin"
 import { MEMORY_AGENTS } from "../src/config.js"
-import plugin, { createMemoryPlugin, MemoryOptionsSchema, MemoryPlugin, MemoryStore, PLUGIN_ID } from "../src/index.js"
+import type { PluginConfig } from "../src/host/v1/sdk.js"
+import plugin, {
+  createMemoryPlugin,
+  createV2Setup,
+  MemoryOptionsSchema,
+  MemoryPlugin,
+  MemorySetup,
+  MemoryStore,
+  PLUGIN_ID,
+} from "../src/index.js"
 import { AUTO_MEMORY_MARKER } from "../src/prompt/systemPrompt.js"
-import type { PluginConfig } from "../src/sdk.js"
 import {
   callOptions,
   cleanupTempDirs,
@@ -36,10 +44,13 @@ const DB_MEMORY = {
 }
 
 describe("plugin module shape", () => {
-  test("default export is a PluginModule and the named exports are the public API", () => {
-    expect(plugin).toEqual({ id: PLUGIN_ID, server: MemoryPlugin })
+  test("default export serves both plugin APIs and the named exports are the public API", () => {
+    // V1 (OpenCode 1.18.29+) loads `server`, V2 (OpenCode 2.x) loads `setup`.
+    expect(plugin).toEqual({ id: PLUGIN_ID, server: MemoryPlugin, setup: MemorySetup })
     expect(typeof MemoryPlugin).toBe("function")
+    expect(typeof MemorySetup).toBe("function")
     expect(typeof createMemoryPlugin).toBe("function")
+    expect(typeof createV2Setup).toBe("function")
     expect(MemoryOptionsSchema.safeParse({}).success).toBe(true)
     expect(typeof MemoryStore).toBe("function")
   })
@@ -145,7 +156,11 @@ describe("recall prefetch end to end", () => {
     ])
     const prompt = await systemTransform(hooks, "real-session")
 
-    expect(methods(calls).filter((m) => m !== "list" && m !== "messages")).toEqual(["create", "prompt", "delete"])
+    expect(methods(calls).filter((m) => m !== "list" && m !== "messages" && m !== "log")).toEqual([
+      "create",
+      "prompt",
+      "delete",
+    ])
     const promptCall = calls.find((c) => c.method === "prompt")
     const promptText = callOptions<{ body: { parts: Array<{ text: string }> } }>(promptCall).body.parts[0]?.text ?? ""
     expect(promptText).toContain("Query: How should we test database changes?")
@@ -307,7 +322,12 @@ describe("extraction end to end", () => {
     await emit(hooks, { type: "session.idle", properties: { sessionID: "parent-session" } })
     await new Promise((resolve) => setTimeout(resolve, 30))
 
-    expect(methods(calls).filter((m) => m !== "list")).toEqual(["messages", "create", "prompt", "delete"])
+    expect(methods(calls).filter((m) => m !== "list" && m !== "log")).toEqual([
+      "messages",
+      "create",
+      "prompt",
+      "delete",
+    ])
     const body = callOptions<{ body: Record<string, unknown> }>(calls.find((c) => c.method === "prompt")).body
     expect(body.agent).toBe(MEMORY_AGENTS.extract)
     expect(body.tools).toEqual({ "*": false, memory_save: true, memory_list: true, memory_read: true })
