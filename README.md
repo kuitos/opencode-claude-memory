@@ -144,7 +144,7 @@ The V2 plugin API exposes less than V1, so a few behaviours differ:
 | Memory directory | `~/.claude/projects/<sanitized canonical git root>/memory/` | identical (`sanitizePath`, worktree → main repo resolution ported byte for byte) |
 | File format | Markdown + `name` / `description` / `type` frontmatter | identical; frontmatter parsed only within the first 30 lines, as in Claude Code |
 | Taxonomy | `user`, `feedback`, `project`, `reference` | identical |
-| `MEMORY.md` | one-line pointers, hand-organisable | read with the same truncation rules; written with minimal line-level edits |
+| `MEMORY.md` | one-line pointers, hand-organisable | read with the same truncation rules; written with minimal line-level edits, hand-written pointer lines are never replaced |
 | Sub-directories | `team/x.md` etc. | scanned, recalled and addressable from every tool |
 | System prompt | memory instructions + index + recalled memories | ported sections (`memoryTypes.ts`, `memdir.ts`) |
 | Recall | LLM side query | LLM side query (`findRelevantMemories.ts` port): a hidden child session on 1.x, a `generate.text` call on 2.x |

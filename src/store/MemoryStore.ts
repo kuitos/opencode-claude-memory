@@ -12,7 +12,13 @@ import {
   parseFrontmatter,
   parseMemoryType,
 } from "./frontmatter.js"
-import { buildIndexPointer, indexHasPointer, readIndexFile, removeIndexLine, upsertIndexLine } from "./indexFile.js"
+import {
+  buildIndexPointer,
+  findIndexPointerLine,
+  readIndexFile,
+  removeIndexLine,
+  upsertIndexLine,
+} from "./indexFile.js"
 import {
   ENTRYPOINT_NAME,
   findCanonicalGitRoot,
@@ -41,7 +47,8 @@ export type SaveMemoryInput = {
 export type SaveMemoryResult = {
   filePath: string
   fileName: string
-  // true when the file and its index pointer already held exactly this content, so nothing was written.
+  // true when the file already held exactly this content and the index already pointed at it, so
+  // nothing was written.
   unchanged: boolean
 }
 
@@ -127,9 +134,13 @@ export class MemoryStore {
 
     const existing = readTextFile(filePath)
     const parsed = existing === null ? null : parseFrontmatter(existing)
-    const pointer = buildIndexPointer(relativePath, input.name, input.description)
-    if (parsed !== null && this.isUnchanged(parsed, relativePath, input, pointer)) {
-      return { filePath, fileName: relativePath, unchanged: true }
+    const index = this.readIndex()
+    const nextIndex = indexAfterSave(index, relativePath, input, parsed)
+    if (parsed !== null && isUnchanged(parsed, relativePath, input)) {
+      // The same memory: at most a missing index pointer is added, the file itself is not rewritten.
+      if (nextIndex === index) return { filePath, fileName: relativePath, unchanged: true }
+      this.writeIndex(nextIndex)
+      return { filePath, fileName: relativePath, unchanged: false }
     }
 
     const modified = this.now().toISOString()
@@ -150,7 +161,7 @@ export class MemoryStore {
     }
 
     writeFileAtomicSync(filePath, fileContent)
-    this.writeIndex(upsertIndexLine(this.readIndex(), relativePath, pointer))
+    if (nextIndex !== index) this.writeIndex(nextIndex)
 
     return { filePath, fileName: relativePath, unchanged: false }
   }
@@ -197,25 +208,48 @@ export class MemoryStore {
   private writeIndex(content: string): void {
     writeFileAtomicSync(this.entrypoint, content)
   }
+}
 
-  // Unchanged means the same name, description, type and body, whatever else the frontmatter
-  // holds, so an identical re-save neither bumps `modified` nor stamps provenance.
-  private isUnchanged(
-    parsed: ParsedMemoryFile,
-    relativePath: string,
-    input: SaveMemoryInput,
-    pointer: string,
-  ): boolean {
-    const { frontmatter, body, hasFrontmatter } = parsed
-    if (!hasFrontmatter) return false
-    // Missing fields compare as the defaults the scanner (and `read()`) reports for them.
-    const same =
-      (frontmatter.name ?? nameFromFilename(relativePath)) === input.name &&
-      (frontmatter.description ?? "") === input.description &&
-      (parseMemoryType(frontmatter.type) ?? "user") === input.type &&
-      body.replace(/\r\n/g, "\n") === input.content.trim().replace(/\r\n/g, "\n")
-    return same && indexHasPointer(this.readIndex(), pointer)
+// A memory's name and description as the scanner (and `read()`) reports them: missing fields
+// count as their defaults.
+function previousFields(parsed: ParsedMemoryFile, relativePath: string): { name: string; description: string } {
+  return {
+    name: parsed.frontmatter.name ?? nameFromFilename(relativePath),
+    description: parsed.frontmatter.description ?? "",
   }
+}
+
+// Unchanged means the same name, description, type and body, whatever else the frontmatter holds,
+// so an identical re-save neither bumps `modified` nor stamps provenance.
+function isUnchanged(parsed: ParsedMemoryFile, relativePath: string, input: SaveMemoryInput): boolean {
+  if (!parsed.hasFrontmatter) return false
+  const before = previousFields(parsed, relativePath)
+  return (
+    before.name === input.name &&
+    before.description === input.description &&
+    (parseMemoryType(parsed.frontmatter.type) ?? "user") === input.type &&
+    parsed.body.replace(/\r\n/g, "\n") === input.content.trim().replace(/\r\n/g, "\n")
+  )
+}
+
+// MEMORY.md after a save. Index lines are often hand-written (Claude Code's format is
+// `- [Title](file.md) — one-line hook`, and neither part has to repeat the frontmatter), so an
+// existing pointer is kept unless it is still exactly the line this plugin generates from the
+// memory's previous name and description: only such a line follows a new name or description. A
+// memory without a pointer gains one. No other line is touched.
+function indexAfterSave(
+  raw: string,
+  relativePath: string,
+  input: SaveMemoryInput,
+  parsed: ParsedMemoryFile | null,
+): string {
+  const pointer = buildIndexPointer(relativePath, input.name, input.description)
+  const current = findIndexPointerLine(raw, relativePath)
+  if (current === undefined) return upsertIndexLine(raw, relativePath, pointer)
+  if (current === pointer || parsed === null) return raw
+  const before = previousFields(parsed, relativePath)
+  const generatedBefore = buildIndexPointer(relativePath, before.name, before.description)
+  return current === generatedBefore ? upsertIndexLine(raw, relativePath, pointer) : raw
 }
 
 // The frontmatter keys of a memory this plugin creates (buildFrontmatter), each on one line; its own

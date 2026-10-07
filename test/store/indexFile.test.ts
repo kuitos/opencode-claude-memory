@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   buildIndexPointer,
+  findIndexPointerLine,
   indexHasPointer,
   removeIndexLine,
   truncateEntrypoint,
@@ -103,6 +104,15 @@ describe("indexHasPointer", () => {
   test("matches whole lines ignoring trailing whitespace", () => {
     expect(indexHasPointer("- [A](a.md) — a  \n", "- [A](a.md) — a")).toBe(true)
     expect(indexHasPointer("- [A](a.md) — a-extra\n", "- [A](a.md) — a")).toBe(false)
+  })
+})
+
+describe("findIndexPointerLine", () => {
+  test("returns the first pointer line for the file without indentation", () => {
+    const raw = "## G\n  - [Hand title](a.md) — hook  \n- [B](b.md) — b\n- [Dup](a.md) — dup\n"
+    expect(findIndexPointerLine(raw, "a.md")).toBe("- [Hand title](a.md) — hook")
+    expect(findIndexPointerLine(raw, "c.md")).toBeUndefined()
+    expect(findIndexPointerLine("see [a](a.md) inline\n", "a.md")).toBeUndefined()
   })
 })
 

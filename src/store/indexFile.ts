@@ -24,6 +24,15 @@ export function indexHasPointer(raw: string, pointer: string): boolean {
   return raw.split(/\r?\n/).some((line) => line.trimEnd() === pointer)
 }
 
+// The first pointer line for `fileName` without its indentation and trailing whitespace, or
+// undefined when the index has none.
+export function findIndexPointerLine(raw: string, fileName: string): string | undefined {
+  return raw
+    .split(/\r?\n/)
+    .find((line) => pointerTarget(line) === fileName)
+    ?.trim()
+}
+
 function detectEol(raw: string): string {
   return raw.includes("\r\n") ? "\r\n" : "\n"
 }

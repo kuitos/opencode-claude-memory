@@ -109,6 +109,7 @@ test/
 - **NEVER** touch memory files without `resolveMemoryFilePath()` / `MemoryStore` — path traversal and symlink-escape risk; `MEMORY` is reserved. The scanner walks directories itself and never follows links.
 - **NEVER** extract a slice whose trailing assistant message has no `time.completed`, and never advance a watermark backwards (`ExtractionCoordinator.advance` is monotonic).
 - **NEVER** rewrite `MEMORY.md` wholesale — use `upsertIndexLine` / `removeIndexLine` (Claude Code formatting must survive).
+- **NEVER** replace an index line someone wrote by hand: `MemoryStore.save()` adds a missing pointer, but replaces an existing one only when it is still exactly the line generated from the memory's previous fields (`indexAfterSave`).
 - **NEVER** run a fork without a sandbox and timeout (V1 `runForkSession` with `tools` and `timeoutMs`; V2 `runV2Fork` with `permissions` and `timeoutMs`); forks read untrusted transcript content.
 - **NEVER** treat a plugin-owned session (`OwnedSessions`) as a user session in hooks or events.
 - **NEVER** assume memory content is fresh — recalled memories carry `ageInDays`.
