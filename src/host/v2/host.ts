@@ -5,9 +5,12 @@
 //   watermark message that was compacted away yields `truncated: true`;
 // - listSessions is unavailable (the plugin API cannot list sessions);
 // - generate is a one-shot `generate.text` call: no system prompt, no structured output, so both
-//   are folded into the prompt and the caller parses the text.
+//   are folded into the prompt and the caller parses the text. It sends no tools at all (2.0.22
+//   builds the request with `tools: []`), so the recall agent's ruleset never comes into play.
+import type { Logger } from "../../util/log.js"
 import { withDeadline } from "../../util/timeout.js"
 import { type GenerateInput, type MemoryHost, SDK_READ_TIMEOUT_MS } from "../types.js"
+import { forkSessionRules, PERMISSIONS_PROBE_AGENT } from "./agents.js"
 import { type ModelRef, type PermissionRule, runV2Fork, type V2Message, type V2SessionApi } from "./fork.js"
 import { toTranscript } from "./transcript.js"
 
@@ -18,8 +21,9 @@ export type V2HostOptions = {
   generateText: (input: { prompt: string; model?: ModelRef }) => Promise<{ text: string }>
   // The agent as the host resolved it (after the user's config), or undefined when unknown.
   getAgent: (name: string) => Promise<V2AgentInfo | undefined>
-  // Ruleset used when the agent cannot be resolved.
+  // The agent's sandbox: the session ruleset of every fork starts with it.
   sandboxFor: (name: string) => PermissionRule[]
+  log?: Logger
 }
 
 // The V2 plugin calls take no AbortSignal; withDeadline only bounds the wait.
@@ -85,12 +89,22 @@ export class V2Host implements MemoryHost {
   }
 
   private async fork(input: Parameters<MemoryHost["runFork"]>[0]): Promise<readonly V2Message[]> {
-    // The resolved agent's ruleset (sandbox + the user's overrides) is also passed as the session
-    // ruleset; without one the child would inherit its parent's session permissions.
-    const agent = await this.agent(input.agent)
-    const permissions = agent?.permissions?.length
-      ? agent.permissions.map((rule) => ({ ...rule }))
-      : this.options.sandboxFor(input.agent)
+    // The resolved agent ruleset carries the global `permissions` after the sandbox (see agents.ts),
+    // so it is never passed through: the session ruleset is the sandbox followed by the agent's own
+    // rules only. Without an explicit one the child would also inherit its parent's session rules.
+    const sandbox = this.options.sandboxFor(input.agent)
+    const [agent, probe] = await Promise.all([this.agent(input.agent), this.agent(PERMISSIONS_PROBE_AGENT)])
+    const { rules: permissions, own } = forkSessionRules(sandbox, agent?.permissions, probe?.permissions)
+    if (!own && agent?.permissions) {
+      this.options.log?.(
+        "warn",
+        "Memory agent overrides could not be told apart from global rules; forking with the bare sandbox",
+        {
+          agent: input.agent,
+        },
+      )
+    }
+    this.options.log?.("debug", "Memory fork session permissions", { agent: input.agent, permissions })
     return runV2Fork(this.options.session, {
       ...input,
       permissions,

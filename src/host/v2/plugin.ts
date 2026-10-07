@@ -71,6 +71,7 @@ export const createV2Setup =
         return agent?.data
       },
       sandboxFor: (name) => sandboxRules(defaults[name]?.allowedTools ?? []),
+      log,
     })
     const deps = { store, config, host, owned, log }
     const recall = new RecallCoordinator(deps)

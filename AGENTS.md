@@ -26,7 +26,7 @@ src/
 │   │   └── log.ts                # createLogger: client.app.log wrapper
 │   └── v2/                       # OpenCode 2.x (`setup` entry, @opencode/plugin)
 │       ├── plugin.ts             # createV2Setup: tools (codemode: false), agent.transform, hooks, event loop, cleanup
-│       ├── agents.ts             # Permission-rule sandbox [*:*:deny, memory_x:*:allow, ...user rules]; host baseline stripped
+│       ├── agents.ts             # Permission-rule sandbox [*:*:deny, memory_x:*:allow, ...user rules]; host baseline stripped; permissions probe; forkSessionRules
 │       ├── host.ts               # V2Host: MemoryHost over ctx.session / generate.text / agent lookup
 │       ├── fork.ts               # runV2Fork: create → prompt → wait → context → remove; interrupt on timeout
 │       ├── events.ts             # V2SessionEvents (location filtering, busy/idle) + consumeEvents (resubscribe)
@@ -117,7 +117,7 @@ test/
 
 - `store/paths.ts`: `validateMemoryFileName()` rejects traversal, absolute paths, dotfiles, null bytes and the reserved name; `resolveMemoryFilePath()` re-checks containment after resolution. `resolveCanonicalRoot()` validates the worktree gitdir → commondir → backlink chain.
 - V1 (`host/v1/fork.ts` + `host/v1/agents.ts`): forks run hidden agents whose tools are `{"*": false, memory_*: true}`; the same sandbox is passed in the prompt body as defence in depth.
-- V2 (`host/v2/fork.ts` + `host/v2/agents.ts`): the sandbox is the permission ruleset `[*:*:deny, memory_x:*:allow, ...user rules]` (last match wins); forks also pass the resolved ruleset as session `permissions`. One layer only: V2 has no per-prompt tool map.
+- V2 (`host/v2/fork.ts` + `host/v2/agents.ts` + `host/v2/host.ts`): the host evaluates `[...agent rules, ...session rules]`, last match wins, `ask` when nothing matches; a deny is decided before saved "always" approvals or the `permission.evaluate` hook, and the model's tool catalog is built from the same merged list. The agent ruleset alone cannot hold the sandbox: OpenCode's config transform appends the global `permissions` of opencode.json to every agent after plugin transforms (#48), so a global `*:*:allow` / `shell:allow` / `external_directory:ask` would follow it and win. The fork's session ruleset is therefore `forkSessionRules()`: the sandbox `[*:*:deny, memory_x:*:allow]` followed by the agent's own rules (`agents.<name>.permissions`, told apart from the global ones through the hidden deny-all `opencode-memory-permissions-probe` agent, which collects exactly the rules appended to every agent). Global rules never reach a fork, neither to widen nor to narrow it; when the agent's own rules cannot be recovered the fork runs under the bare sandbox. NEVER pass the resolved agent ruleset as session `permissions`. V2 has no per-prompt tool map. Recall uses `generate.text`, which sends no tools at all.
 
 ## Constants
 
@@ -163,11 +163,11 @@ Verified against `@opencode/cli` 2.0.22:
 
 - Plugin tools must be added with `options: { codemode: false }`, otherwise V2 hides them behind the Code Mode `execute` tool.
 - `editor.update()` of a new agent starts from the host's default ruleset, which begins with `*:*:allow`. The transform strips that baseline (read via a throwaway probe agent) and puts the sandbox before the user's rules.
-- User `agents` config is applied after external plugin transforms, so user overrides win either way.
+- User config is applied by the built-in `opencode.config.agent` transform after external plugin transforms: it pushes the global `permissions` onto every existing agent, then each `agents.<name>` entry's `permissions` (model shape `{ providerID, model }`). The browser plugin then pushes `browser:*:deny` onto every agent. So a memory agent resolves to `[sandbox, ...global, ...own, browser deny]`, and `opencode-memory-permissions-probe` to `[*:*:deny, ...global, browser deny]`.
 - The event stream is global across locations and `session.execution.*` events carry no location. Only sessions seen by the location-scoped prompt/context hooks, or `session.created` with this location, are acted on.
 - Idle = `session.execution.succeeded|failed|interrupted` (no `session.status` events observed).
 - `session.prompt` only enqueues and `session.wait` takes no AbortSignal, so every V2 call is bounded with `withTimeout`.
-- A child session inherits its parent's session permissions unless given, so forks always pass the resolved agent ruleset as session `permissions`.
+- A child session inherits its parent's session permissions unless given, so forks always pass `forkSessionRules()` (sandbox + the agent's own rules, never the global ones) as session `permissions`; the fork logs it at debug level (`Memory fork session permissions`).
 - V2 prompts have no `system` field: the fork's system prompt is injected by the plugin's own context hook.
 - `session.context` returns only the messages after the last compaction.
 
@@ -180,3 +180,4 @@ Verified against `@opencode/cli` 2.0.22:
 5. Routes: `GET /api/plugin` (status `active` vs `failed`), `POST /api/session` `{agent, model:{providerID,id}}`, `POST /api/session/:id/prompt` `{text}`, `POST /api/experimental/session/:id/wait`, `GET /api/session/:id/context`, `GET /api/agent/:id`, `DELETE /api/session/:id`.
 6. Use a paid model such as `opencode/gpt-6-luna` for the memory agents: Zen free models (e.g. `opencode/big-pickle`) return 403 for any request whose tool list lacks OpenCode's `shell` tool, i.e. every sandboxed fork and the V2 recall `generate.text` call.
 7. Plugin logs: `<CLAUDE_CONFIG_DIR>/opencode-memory/<key>/opencode-memory.log`. Stop with `pkill -9 -f 'serve --port 4098'`.
+8. Sandbox checks: forks are removed when they finish, so snapshot `GET /api/session?parentID=<id>`, `GET /api/session/:fork` (session `permissions`) and its context while it runs; `GET /api/permission/request` shows a fork stuck on an `ask`. That free-model 403 doubles as a tool-catalog oracle: a session under a memory agent with `opencode/big-pickle` fails with `FreeTierError` exactly when `shell` is not in its catalog.
