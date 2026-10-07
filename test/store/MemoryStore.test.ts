@@ -282,6 +282,114 @@ describe("MemoryStore.save / read", () => {
   })
 })
 
+describe("MemoryStore index lines written by hand (#49)", () => {
+  const HAND_WRITTEN =
+    "# Memory index\n\n## Deploy\n- [How we ship](deploy-script.md) — the prod deploy entry point, ask before running\n- [Freeze](project_freeze.md) — merge freeze\n"
+  const DEPLOY = {
+    fileName: "deploy-script",
+    name: "deploy-script",
+    description: "Deploy with scripts/deploy.sh --prod",
+    type: "project" as const,
+    content: "Deploy with `scripts/deploy.sh --prod` from the repo root.",
+  }
+
+  function seedHandWritten() {
+    const store = makeStore()
+    writeFileSync(store.entrypoint, HAND_WRITTEN, "utf-8")
+    writeRawMemory(
+      store.memoryDir,
+      "deploy-script.md",
+      `---\nname: ${DEPLOY.name}\ndescription: ${DEPLOY.description}\nmetadata:\n  type: project\n---\n\n${DEPLOY.content}\n`,
+    )
+    return store
+  }
+
+  test("an identical re-save keeps the hand-written line and writes nothing", () => {
+    const store = seedHandWritten()
+    const memoryPath = join(store.memoryDir, "deploy-script.md")
+    const before = readFileSync(memoryPath, "utf-8")
+
+    expect(store.save(DEPLOY).unchanged).toBe(true)
+    expect(store.readIndex()).toBe(HAND_WRITTEN)
+    expect(readFileSync(memoryPath, "utf-8")).toBe(before)
+  })
+
+  test("a changed description updates the file but keeps the hand-written line", () => {
+    const store = seedHandWritten()
+    const result = store.save({ ...DEPLOY, description: "Deploy script (not found as of 2026-10-07)" })
+
+    expect(result.unchanged).toBe(false)
+    expect(store.read("deploy-script")?.description).toBe("Deploy script (not found as of 2026-10-07)")
+    expect(store.readIndex()).toBe(HAND_WRITTEN)
+  })
+
+  test("a changed body keeps the hand-written line", () => {
+    const store = seedHandWritten()
+    store.save({ ...DEPLOY, content: "scripts/deploy.sh no longer exists as of 2026-10-07." })
+    expect(store.readIndex()).toBe(HAND_WRITTEN)
+  })
+
+  test("a line still exactly as this plugin generated it follows a new name or description", () => {
+    const store = makeStore()
+    store.save(DEPLOY)
+    writeFileSync(store.entrypoint, `## Deploy\n  ${store.readIndex()}- [Freeze](project_freeze.md) — merge freeze\n`)
+
+    store.save({ ...DEPLOY, description: "Deploy via the release workflow" })
+    expect(store.readIndex()).toBe(
+      "## Deploy\n  - [deploy-script](deploy-script.md) — Deploy via the release workflow\n- [Freeze](project_freeze.md) — merge freeze\n",
+    )
+  })
+
+  test("a memory without a pointer gains one without rewriting the file", () => {
+    const store = seedHandWritten()
+    writeFileSync(store.entrypoint, "# Memory index\n\n- [Freeze](project_freeze.md) — merge freeze\n")
+    const memoryPath = join(store.memoryDir, "deploy-script.md")
+    const before = readFileSync(memoryPath, "utf-8")
+
+    expect(store.save(DEPLOY).unchanged).toBe(false)
+    expect(readFileSync(memoryPath, "utf-8")).toBe(before)
+    expect(store.readIndex()).toBe(
+      "# Memory index\n\n- [Freeze](project_freeze.md) — merge freeze\n- [deploy-script](deploy-script.md) — Deploy with scripts/deploy.sh --prod\n",
+    )
+  })
+
+  test("a pointer for a file that does not exist yet is kept when the memory is created", () => {
+    const store = makeStore()
+    const index = "- [Planned: deploy notes](deploy-script.md) — to be written\n"
+    writeFileSync(store.entrypoint, index)
+    store.save(DEPLOY)
+    expect(store.readIndex()).toBe(index)
+  })
+
+  test("re-saving every memory (as a consolidation pass does) leaves a hand-written index byte-identical", () => {
+    const store = makeStore()
+    const index =
+      "# Index\n\n- [Who I work with](user-role.md) — senior Go dev, new to React\n- [Testing rule](no-mocks.md) — integration tests hit a real DB\n"
+    writeFileSync(store.entrypoint, index)
+    writeRawMemory(
+      store.memoryDir,
+      "user-role.md",
+      "---\nname: user-role\ndescription: Go expert, new to React\nmetadata:\n  type: user\n---\n\nTen years of Go.\n",
+    )
+    writeRawMemory(
+      store.memoryDir,
+      "no-mocks.md",
+      "---\nname: no-mocks\ndescription: Do not mock the database\ntype: feedback\n---\n\nUse a real DB.\n",
+    )
+
+    for (const entry of store.list()) {
+      store.save({
+        fileName: entry.filename,
+        name: entry.name,
+        description: `${entry.description} (consolidated)`,
+        type: entry.type,
+        content: `${entry.body}\n\n**Why:** prior incident.`,
+      })
+    }
+    expect(store.readIndex()).toBe(index)
+  })
+})
+
 describe("MemoryStore.delete / list / search", () => {
   test("deletes an existing memory and removes it from the index", () => {
     const store = makeStore()
