@@ -9,6 +9,7 @@
 //   builds the request with `tools: []`), so the recall agent's ruleset never comes into play.
 import type { Logger } from "../../util/log.js"
 import { withDeadline } from "../../util/timeout.js"
+import { buildGeneratePrompt } from "../generate.js"
 import { type GenerateInput, type MemoryHost, SDK_READ_TIMEOUT_MS } from "../types.js"
 import { forkSessionRules, PERMISSIONS_PROBE_AGENT } from "./agents.js"
 import { type ModelRef, type PermissionRule, runV2Fork, type V2Message, type V2SessionApi } from "./fork.js"
@@ -29,16 +30,6 @@ export type V2HostOptions = {
 // The V2 plugin calls take no AbortSignal; withDeadline only bounds the wait.
 function bounded<T>(what: string, timeoutMs: number, call: () => Promise<T>): Promise<T> {
   return withDeadline(what, timeoutMs, () => call())
-}
-
-export function buildGeneratePrompt(input: Pick<GenerateInput, "system" | "text" | "schema">): string {
-  const sections = [input.system?.trim(), input.text]
-  if (input.schema) {
-    sections.push(
-      `Respond with only a JSON object matching this JSON schema, without code fences or commentary:\n${JSON.stringify(input.schema)}`,
-    )
-  }
-  return sections.filter((section): section is string => Boolean(section)).join("\n\n")
 }
 
 export class V2Host implements MemoryHost {

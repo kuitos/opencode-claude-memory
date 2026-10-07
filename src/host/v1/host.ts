@@ -1,8 +1,9 @@
 // MemoryHost over the V1 SDK client (`server` plugin entry). Every call keeps the exact SDK traffic
 // the coordinators used to make directly: deadlines, `directory` query and the tool sandbox.
 import { withDeadline } from "../../util/timeout.js"
+import { buildGeneratePrompt } from "../generate.js"
 import { type MemoryHost, SDK_READ_TIMEOUT_MS, type SessionSummary, type TranscriptMessage } from "../types.js"
-import { runForkSession } from "./fork.js"
+import { ForkSessionError, runForkSession } from "./fork.js"
 import { type ChatMessage, type OpencodeClient, type SessionInfo, unwrapData } from "./sdk.js"
 
 export type V1HostOptions = {
@@ -31,7 +32,16 @@ export function forkAnswerText(response: unknown): string {
     .join("\n")
 }
 
+// A model or provider without structured output fails a json_schema request (the server reports a
+// StructuredOutputError) even though its text answer is fine, so recall silently selected nothing.
+function isStructuredOutputError(error: unknown): boolean {
+  return error instanceof ForkSessionError && error.message.includes("StructuredOutputError")
+}
+
 export function createV1Host({ client, directory, toolsFor }: V1HostOptions): MemoryHost {
+  // Cleared by the first StructuredOutputError: from then on this host describes the schema in the
+  // prompt and the caller parses the text, as the V2 host always does.
+  let structuredOutput = true
   return {
     async readTranscript(sessionID) {
       const response = await withDeadline("session.messages", SDK_READ_TIMEOUT_MS, (signal) =>
@@ -76,22 +86,36 @@ export function createV1Host({ client, directory, toolsFor }: V1HostOptions): Me
     },
 
     async generate(input) {
-      const response = await runForkSession({
-        client,
-        directory,
-        parentSessionID: input.parentSessionID,
-        title: input.title,
-        agent: input.agent,
-        system: input.system,
-        tools: toolsFor?.(input.agent) ?? { "*": false },
-        ...(input.schema ? { format: { type: "json_schema", schema: input.schema } } : {}),
-        parts: [{ type: "text", text: input.text }],
-        timeoutMs: input.timeoutMs,
-        onCreated: input.onCreated,
-        onFinished: input.onFinished,
-        onCleanupFailed: input.onCleanupFailed,
-      })
-      return forkAnswerText(response)
+      const run = (structured: boolean) =>
+        runForkSession({
+          client,
+          directory,
+          parentSessionID: input.parentSessionID,
+          title: input.title,
+          agent: input.agent,
+          system: input.system,
+          tools: toolsFor?.(input.agent) ?? { "*": false },
+          ...(structured && input.schema ? { format: { type: "json_schema", schema: input.schema } } : {}),
+          parts: [
+            {
+              type: "text",
+              text: structured ? input.text : buildGeneratePrompt({ text: input.text, schema: input.schema }),
+            },
+          ],
+          timeoutMs: input.timeoutMs,
+          onCreated: input.onCreated,
+          onFinished: input.onFinished,
+          onCleanupFailed: input.onCleanupFailed,
+        })
+      if (structuredOutput && input.schema) {
+        try {
+          return forkAnswerText(await run(true))
+        } catch (error) {
+          if (!isStructuredOutputError(error)) throw error
+          structuredOutput = false
+        }
+      }
+      return forkAnswerText(await run(false))
     },
   }
 }

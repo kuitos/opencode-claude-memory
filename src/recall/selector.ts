@@ -37,6 +37,8 @@ export type SelectRelevantMemoriesInput = {
 }
 
 function selectedFrom(value: unknown): string[] | undefined {
+  // A text answer often drops the wrapper object and gives the list alone.
+  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string")
   if (!value || typeof value !== "object") return undefined
   const selected = (value as { selected_memories?: unknown }).selected_memories
   if (!Array.isArray(selected)) return undefined
