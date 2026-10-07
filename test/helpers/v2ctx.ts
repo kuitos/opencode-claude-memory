@@ -64,6 +64,53 @@ export function v2Assistant(text: string, created = ++seq, completed: number | u
   }
 }
 
+// The built-in transforms that run after plugin transforms in 2.0.22 (`opencode.config.agent`, then
+// the browser plugin): the global `permissions` are pushed onto every existing agent, an agent first
+// created by the config gets them too, its own `permissions` follow, and every agent ends up with a
+// `browser` deny.
+const BROWSER_DENY: Rule = { action: "browser", resource: "*", effect: "deny" }
+type AgentEditorLike = {
+  list(): MockAgent[]
+  get(id: string): MockAgent | undefined
+  update(id: string, update: (agent: MockAgent) => void): void
+  remove(id: string): void
+}
+export function applyHostConfig(
+  editor: AgentEditorLike,
+  config: { permissions?: Rule[]; agents?: Record<string, { permissions?: Rule[]; disabled?: boolean }> },
+): void {
+  const global = config.permissions ?? []
+  const copy = (rules: Rule[]) => rules.map((rule) => ({ ...rule }))
+  for (const agent of editor.list()) editor.update(agent.id, (draft) => draft.permissions.push(...copy(global)))
+  for (const [id, entry] of Object.entries(config.agents ?? {})) {
+    if (entry.disabled) {
+      editor.remove(id)
+      continue
+    }
+    const existed = editor.get(id) !== undefined
+    editor.update(id, (draft) => {
+      if (!existed) draft.permissions.push(...copy(global))
+      if (entry.permissions) draft.permissions.push(...copy(entry.permissions))
+    })
+  }
+  for (const agent of editor.list()) editor.update(agent.id, (draft) => draft.permissions.push({ ...BROWSER_DENY }))
+}
+
+// OpenCode 2.0.22's evaluation: `[...agent rules, ...session rules]`, last match wins (wildcards on
+// action and resource), `ask` when nothing matches.
+function wildcard(value: string, pattern: string): boolean {
+  let source = pattern
+    .replaceAll("\\", "/")
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".")
+  if (source.endsWith(" .*")) source = `${source.slice(0, -3)}( .*)?`
+  return new RegExp(`^${source}$`, "s").test(value.replaceAll("\\", "/"))
+}
+export function evaluate(rules: readonly Rule[], action: string, resource = "*"): Rule["effect"] {
+  return rules.findLast((rule) => wildcard(action, rule.action) && wildcard(resource, rule.resource))?.effect ?? "ask"
+}
+
 export type ForkBehaviour = (sessionID: string, text: string) => MockMessage[] | "hang"
 
 export function makeV2Context(
@@ -76,6 +123,8 @@ export function makeV2Context(
     conversations?: Record<string, MockMessage[]>
     fork?: ForkBehaviour
     generate?: (prompt: string) => string | Promise<string>
+    // opencode.json, applied the way 2.0.22's config-agent transform does after plugin transforms.
+    config?: { permissions?: Rule[]; agents?: Record<string, { permissions?: Rule[]; disabled?: boolean }> }
   } = {},
 ) {
   const directory = input.directory ?? tempGitRepo("ocm-v2-repo-")
@@ -122,6 +171,7 @@ export function makeV2Context(
       transform: async (callback: (editor: typeof agentEditor) => void) => {
         calls.push({ method: "agent.transform" })
         callback(agentEditor)
+        if (input.config) applyHostConfig(agentEditor, input.config)
         return registration("agent.transform")
       },
       get: async ({ agentID }: { agentID: string }) => {
