@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { buildMemoryTools } from "../src/host/v1/tools.js"
 import { formatMemorySaveResult, memoryListTitle, memorySaveTitle, memorySearchTitle } from "../src/tools.js"
 import { cleanupTempDirs, makeStore, resultOutput, resultTitle, toolCtx } from "./helpers/index.js"
@@ -116,6 +118,40 @@ describe("buildMemoryTools", () => {
     expect(resultOutput(missingDelete as never)).toBe('Memory "nope" not found.')
     // Only deletions that happened are reported (the auto-dream summary lists them).
     expect(deletes).toEqual([["main", "title_verification.md"]])
+  })
+
+  test("memory_save writes a slug name and metadata.type and titles the index line with `title` (#47)", async () => {
+    const { tools, store } = setup()
+    const args = {
+      file_name: "terse-responses",
+      name: "terse-responses",
+      title: "Terse responses",
+      description: "no trailing summaries",
+      type: "feedback",
+      content: "Skip post-action summaries.",
+    }
+    const saved = await tools.memory_save?.execute(args, toolCtx({ sessionID: "main" }))
+    expect(resultTitle(saved as never)).toBe("feedback: Terse responses")
+    expect(store.readIndex()).toBe("- [Terse responses](terse-responses.md) — no trailing summaries\n")
+    const raw = readFileSync(join(store.memoryDir, "terse-responses.md"), "utf-8")
+    expect(raw).toStartWith(
+      "---\nname: terse-responses\ndescription: no trailing summaries\nmetadata:\n  type: feedback\n",
+    )
+
+    const saveArgsSchema = (tools.memory_save?.args ?? {}) as Record<string, { description?: string }>
+    const described = (key: string) => String(saveArgsSchema[key]?.description)
+    expect(described("file_name")).toContain("kebab-case slug")
+    expect(described("file_name")).not.toContain("snake_case")
+    expect(described("name")).toContain("kebab-case slug")
+    expect(described("title")).toContain("MEMORY.md")
+  })
+
+  test("memory_save without a title titles a new index line with the name", async () => {
+    const { tools, store } = setup()
+    await tools.memory_save?.execute({ ...saveArgs, title: "  " }, toolCtx({ sessionID: "main" }))
+    expect(store.readIndex()).toBe(
+      "- [Title Verification Test](title_verification.md) — Verifies final tool titles are persisted\n",
+    )
   })
 
   test("memory_delete steers outdated memories to an update instead of a deletion (#49)", () => {

@@ -30,9 +30,10 @@ Convert a relative date ("Thursday", "tomorrow") to an absolute one only when it
 ## How to save
 
 For each memory worth saving, call \`memory_save\` with:
-- \`file_name\`: descriptive slug (e.g., \`user_role\`, \`feedback_testing_approach\`)
-- \`name\`: short title
-- \`description\`: one-line description (used for relevance matching in future sessions)
+- \`file_name\`: a short kebab-case slug (e.g., \`user-role\`, \`no-db-mocks-in-tests\`); for an existing memory, its existing file name
+- \`name\`: the same kebab-case slug (for an existing memory, keep its current name)
+- \`title\` (optional): a short human-readable title for the memory's MEMORY.md line
+- \`description\`: one-line summary (used for relevance matching in future sessions)
 - \`type\`: one of user, feedback, project, reference
 - \`content\`: the memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines — only with what the conversation actually says; leave a line out rather than fill it with a guess or a placeholder.
 

@@ -83,7 +83,8 @@ export function buildMemoryToolSpecs(
       name: "memory_save",
       description:
         "Save or update a memory for future conversations. " +
-        "Each memory is stored as a markdown file with frontmatter. " +
+        "Each memory is stored as a markdown file with Claude Code's frontmatter (name, description, metadata.type) " +
+        "and gets a line in MEMORY.md. " +
         "Use this when the user explicitly asks you to remember something, " +
         "or when you observe important information worth preserving across sessions " +
         "(user preferences, feedback, project context, external references). " +
@@ -92,12 +93,22 @@ export function buildMemoryToolSpecs(
         file_name: z
           .string()
           .describe(
-            'File name for the memory (without .md extension). Use snake_case, e.g. "user_role", "feedback_testing_style", "project_auth_rewrite"; a sub-directory prefix such as "team/conventions" is allowed',
+            'File name for the memory (without .md extension). Use a short kebab-case slug, e.g. "user-role", "no-db-mocks-in-tests", "auth-rewrite-compliance"; a sub-directory prefix such as "team/conventions" is allowed. To update an existing memory, use its existing file name',
           ),
-        name: z.string().describe("Human-readable name for this memory"),
+        name: z
+          .string()
+          .describe(
+            'Short kebab-case slug identifying the memory, normally the file name without .md (e.g. "user-role"). When updating an existing memory, keep its current name',
+          ),
+        title: z
+          .string()
+          .optional()
+          .describe(
+            'Optional human-readable title for the memory\'s line in MEMORY.md ("- [Title](file.md) — description"); defaults to name. Existing index lines written by hand are never replaced',
+          ),
         description: z
           .string()
-          .describe("One-line description — used to decide relevance in future conversations, so be specific"),
+          .describe("One-line summary — used to decide relevance in future conversations, so be specific"),
         type: z
           .enum(MEMORY_TYPES)
           .describe(
@@ -118,10 +129,11 @@ export function buildMemoryToolSpecs(
           description: str(args, "description"),
           type,
           content: str(args, "content"),
+          ...(str(args, "title").trim() ? { title: str(args, "title") } : {}),
         })
         const savedThisRun = extraction.recordSave(ctx.sessionID, outcome.fileName)
         return {
-          title: memorySaveTitle(type, str(args, "name")),
+          title: memorySaveTitle(type, str(args, "title").trim() || str(args, "name")),
           output: formatMemorySaveResult(outcome, savedThisRun),
         }
       },

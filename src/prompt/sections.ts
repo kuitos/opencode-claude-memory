@@ -1,13 +1,15 @@
 // Constant prompt text ported from Claude Code's memoryTypes.ts / memdir.ts.
 import { MEMORY_TYPES } from "../store/frontmatter.js"
 
-// Port of Claude Code's MEMORY_FRONTMATTER_EXAMPLE from memoryTypes.ts
+// Claude Code's current memory frontmatter: a kebab-case slug as `name` and the type under
+// `metadata:` (older files keep a title as `name` and a top-level `type:`; both are still read).
 export const FRONTMATTER_EXAMPLE = [
   "```markdown",
   "---",
-  "name: {{memory name}}",
-  "description: {{one-line description — used to decide relevance in future conversations, so be specific}}",
-  `type: {{${MEMORY_TYPES.join(", ")}}}`,
+  "name: {{short-kebab-case-slug}}",
+  "description: {{one-line summary — used to decide relevance in future conversations, so be specific}}",
+  "metadata:",
+  `  type: {{${MEMORY_TYPES.join(" | ")}}}`,
   "---",
   "",
   "{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}",
