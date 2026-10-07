@@ -91,6 +91,48 @@ describe("AutoDream.maybeRun", () => {
     expect(existsSync(join(store.stateDir, "maintenance.lock"))).toBe(false)
   })
 
+  test("logs what the consolidation fork saved and deleted (#49)", async () => {
+    const { dream, selector, entries } = setup()
+    selector.raw.session.prompt = async (opts) => {
+      selector.calls.push({ method: "prompt", options: opts })
+      expect(dream.record("selector-session-1", "saved", "merged.md")).toBe(true)
+      dream.record("selector-session-1", "saved", "merged.md")
+      dream.record("selector-session-1", "deleted", "duplicate.md")
+      return { data: { info: {}, parts: [] } }
+    }
+    expect(await dream.maybeRun("parent")).toBe(true)
+    expect(entries.find((e) => e.message === "Auto-dream consolidation completed")?.extra).toEqual({
+      saved: ["merged.md"],
+      deleted: ["duplicate.md"],
+    })
+    // Once the fork is gone its session is no longer tracked.
+    expect(dream.record("selector-session-1", "saved", "late.md")).toBe(false)
+    expect(dream.record("ses_user", "saved", "x.md")).toBe(false)
+  })
+
+  test("the failure log lists what the fork changed before it failed", async () => {
+    const { dream, selector, entries } = setup()
+    selector.raw.session.prompt = async () => {
+      dream.record("selector-session-1", "deleted", "old-goal.md")
+      throw new Error("model unavailable")
+    }
+    expect(await dream.maybeRun("parent")).toBe(false)
+    expect(entries.find((e) => e.message === "Auto-dream consolidation failed")?.extra).toMatchObject({
+      saved: [],
+      deleted: ["old-goal.md"],
+    })
+  })
+
+  test("the prompt keeps descriptions and never asks for placeholder Why / How lines (#49)", () => {
+    expect(AUTODREAM_PROMPT).not.toContain("Rewrite vague descriptions")
+    expect(AUTODREAM_PROMPT).not.toContain("ensure content is structured")
+    expect(AUTODREAM_PROMPT).toContain("Do not reword names or descriptions")
+    expect(AUTODREAM_PROMPT).toContain("Never add **Why:** / **How to apply:** lines")
+    expect(AUTODREAM_PROMPT).toContain("Merge duplicates")
+    expect(AUTODREAM_PROMPT).toContain("clearly obsolete")
+    expect(AUTODREAM_PROMPT).toContain("Do not edit MEMORY.md")
+  })
+
   test("does nothing while the gate is closed or when disabled", async () => {
     const closed = setup({ sessions: ["a"] })
     expect(await closed.dream.maybeRun("parent")).toBe(false)

@@ -4,13 +4,14 @@
 import type { MemoryConfig } from "../config.js"
 import { type MemoryHost, SDK_READ_TIMEOUT_MS, type SessionSummary, type TranscriptMessage } from "../host/types.js"
 import type { MemoryStore } from "../store/MemoryStore.js"
+import { formatMemoryManifest } from "../store/scan.js"
 import { findLegacyShellHooks } from "../util/legacyShellHook.js"
 import { getErrorMessage, type Logger } from "../util/log.js"
 import type { OwnedSessions } from "../util/ownedSessions.js"
 import { TimeoutError } from "../util/timeout.js"
 import { AutoDream } from "./autodream.js"
 import { MaintenanceLock } from "./lock.js"
-import { buildExtractionSystemPrompt, buildExtractionUserMessage } from "./prompts.js"
+import { buildExtractionSystemPrompt, buildExtractionUserMessage, formatLocalDate } from "./prompts.js"
 import { ExtractionStateStore, migrateLegacyAutodreamState, type SessionExtractionState } from "./state.js"
 
 export { SDK_READ_TIMEOUT_MS }
@@ -188,8 +189,14 @@ export class ExtractionCoordinator {
       fork.push(fileName)
       return fork
     }
+    if (this.autodream?.record(sessionID, "saved", fileName)) return undefined
     if (!this.deps.owned.has(sessionID)) this.savedByMainAgent.add(sessionID)
     return undefined
+  }
+
+  // memory_delete reports every deletion; only the auto-dream fork's are kept (for its summary log).
+  recordDelete(sessionID: string | undefined, fileName: string): void {
+    if (sessionID) this.autodream?.record(sessionID, "deleted", fileName)
   }
 
   isOwnedSession(sessionID: string | undefined): boolean {
@@ -388,17 +395,23 @@ export class ExtractionCoordinator {
           return
         }
 
+        const saved: string[] = []
         try {
+          const memories = store.scan()
+          // Memories written since the slice began were saved during this conversation, usually by
+          // the main agent (memory_save or its own file tools): the fork must not duplicate them.
+          const sliceStart = messageTime(snapshot.fresh[0] ?? snapshot.last).created
+          const savedDuring = sliceStart === undefined ? [] : memories.filter((memory) => memory.mtimeMs >= sliceStart)
           await host.runFork({
             parentSessionID: sessionID,
             title: EXTRACTION_TITLE,
             agent: config.agents.extract,
-            system: buildExtractionSystemPrompt(store.manifest()),
-            text: buildExtractionUserMessage(conversation),
+            system: buildExtractionSystemPrompt(formatMemoryManifest(memories), formatMemoryManifest(savedDuring)),
+            text: buildExtractionUserMessage(conversation, formatLocalDate(this.now())),
             timeoutMs: config.extract.timeoutMs,
             onCreated: (forkID) => {
               owned.add(forkID)
-              this.savedByFork.set(forkID, [])
+              this.savedByFork.set(forkID, saved)
             },
             onFinished: (forkID) => {
               owned.release(forkID, FORK_GRACE_MS)
@@ -430,6 +443,7 @@ export class ExtractionCoordinator {
           }
           return
         }
+        log("info", "Memory extraction completed", { sessionID, saved: Array.from(new Set(saved)) })
         // The watermark is committed while the lock is still held, so no other process can run
         // an extraction between the fork's writes and the watermark that records them.
         extracted = this.advance(sessionID, snapshot)

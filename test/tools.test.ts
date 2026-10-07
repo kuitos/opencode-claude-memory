@@ -56,13 +56,17 @@ describe("buildMemoryTools", () => {
   function setup() {
     const store = makeStore()
     const saves: Array<[string | undefined, string]> = []
+    const deletes: Array<[string | undefined, string]> = []
     const extraction = {
       recordSave(sessionID: string | undefined, fileName: string) {
         saves.push([sessionID, fileName])
         return sessionID === "fork" ? ["earlier.md", fileName] : undefined
       },
+      recordDelete(sessionID: string | undefined, fileName: string) {
+        deletes.push([sessionID, fileName])
+      },
     }
-    return { store, saves, tools: buildMemoryTools(store, extraction) }
+    return { store, saves, deletes, tools: buildMemoryTools(store, extraction) }
   }
 
   const saveArgs = {
@@ -74,7 +78,7 @@ describe("buildMemoryTools", () => {
   }
 
   test("runs the full lifecycle and returns titles with every result", async () => {
-    const { tools, store } = setup()
+    const { tools, store, deletes } = setup()
     const ctx = toolCtx({ sessionID: "main" })
 
     const save = await tools.memory_save?.execute(saveArgs, ctx)
@@ -110,6 +114,24 @@ describe("buildMemoryTools", () => {
     expect(resultOutput(missing as never)).toBe('Memory "nope" not found.')
     const missingDelete = await tools.memory_delete?.execute({ file_name: "nope" }, ctx)
     expect(resultOutput(missingDelete as never)).toBe('Memory "nope" not found.')
+    // Only deletions that happened are reported (the auto-dream summary lists them).
+    expect(deletes).toEqual([["main", "title_verification.md"]])
+  })
+
+  test("memory_delete steers outdated memories to an update instead of a deletion (#49)", () => {
+    const { tools } = setup()
+    const description = String(tools.memory_delete?.description)
+    expect(description).toContain("only when the user asks you to forget something")
+    expect(description).toContain("should be updated with memory_save")
+    expect(description).not.toContain("outdated, wrong, or no longer relevant")
+  })
+
+  test("memory_save's content guidance forbids estimated dates and placeholder Why/How lines (#49)", () => {
+    const { tools } = setup()
+    const args = (tools.memory_save?.args ?? {}) as Record<string, { description?: string }>
+    const content = String(args.content?.description)
+    expect(content).toContain('anchored to today (e.g. "last week, as of 2026-03-05"); never estimate a date')
+    expect(content).toContain("when they are known (never as placeholders)")
   })
 
   test("rejects an omitted memory name before persistence", async () => {

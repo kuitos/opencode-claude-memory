@@ -31,9 +31,18 @@ export type AutoDreamDeps = {
   lock?: MaintenanceLock
 }
 
+// What one consolidation fork did, in call order (memory_save / memory_delete report each call).
+export type DreamActivity = { saved: string[]; deleted: string[] }
+
+function summarize(activity: DreamActivity): { saved: string[]; deleted: string[] } {
+  return { saved: Array.from(new Set(activity.saved)), deleted: Array.from(new Set(activity.deleted)) }
+}
+
 export class AutoDream {
   private readonly now: () => number
   private readonly lock: MaintenanceLock
+  // Running consolidation forks by session id, so their tool calls can be summarised in the log.
+  private readonly activity = new Map<string, DreamActivity>()
 
   constructor(private readonly deps: AutoDreamDeps) {
     this.now = deps.now ?? Date.now
@@ -43,6 +52,14 @@ export class AutoDream {
   // Called from the extraction coordinator's persisted update after a session was extracted.
   static noteSession(state: AutodreamState, sessionID: string): void {
     if (!state.sessionsSince.includes(sessionID)) state.sessionsSince.push(sessionID)
+  }
+
+  // Records a memory tool call made inside a running consolidation fork; false for any other session.
+  record(sessionID: string, kind: keyof DreamActivity, fileName: string): boolean {
+    const activity = this.activity.get(sessionID)
+    if (!activity) return false
+    activity[kind].push(fileName)
+    return true
   }
 
   shouldRun(): boolean {
@@ -61,6 +78,7 @@ export class AutoDream {
     }
 
     const { host, config, owned, state, log } = this.deps
+    const activity: DreamActivity = { saved: [], deleted: [] }
     try {
       // Re-check under the lock: another process may have consolidated while we waited to acquire.
       if (!this.shouldRun()) return false
@@ -76,8 +94,14 @@ export class AutoDream {
         system: AUTODREAM_PROMPT,
         text: AUTODREAM_USER_MESSAGE,
         timeoutMs: config.autodream.timeoutMs,
-        onCreated: (id) => owned.add(id),
-        onFinished: (id) => owned.release(id, AUTODREAM_FORK_GRACE_MS),
+        onCreated: (id) => {
+          owned.add(id)
+          this.activity.set(id, activity)
+        },
+        onFinished: (id) => {
+          owned.release(id, AUTODREAM_FORK_GRACE_MS)
+          this.activity.delete(id)
+        },
         onCleanupFailed: (id, stage, error) =>
           log("warn", "Auto-dream fork cleanup failed; the server may still hold the fork session", {
             forkID: id,
@@ -89,10 +113,11 @@ export class AutoDream {
         data.autodream.lastConsolidatedAt = this.now()
         data.autodream.sessionsSince = []
       })
-      log("info", "Auto-dream consolidation completed")
+      log("info", "Auto-dream consolidation completed", summarize(activity))
       return true
     } catch (error) {
-      log("error", "Auto-dream consolidation failed", { error: getErrorMessage(error) })
+      // Saves and deletes made before the failure are already on disk: report them too.
+      log("error", "Auto-dream consolidation failed", { error: getErrorMessage(error), ...summarize(activity) })
       return false
     } finally {
       this.lock.release()

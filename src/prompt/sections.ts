@@ -54,7 +54,7 @@ export const TYPES_SECTION = [
   "<type>",
   "    <name>project</name>",
   "    <description>Information that you learn about ongoing work, goals, initiatives, bugs, or incidents within the project that is not otherwise derivable from the code or git history. Project memories help you understand the broader context and motivation behind the work the user is doing within this working directory.</description>",
-  '    <when_to_save>When you learn who is doing what, why, or by when. These states change relatively quickly so try to keep your understanding of this up to date. Always convert relative dates in user messages to absolute dates when saving (e.g., "Thursday" → "2026-03-05"), so the memory remains interpretable after time passes.</when_to_save>',
+  '    <when_to_save>When you learn who is doing what, why, or by when. These states change relatively quickly so try to keep your understanding of this up to date. Convert relative dates in user messages to absolute dates when saving (e.g., "Thursday" → "2026-03-05"), so the memory remains interpretable after time passes — but only when the date can be worked out exactly from today\'s date. When it cannot ("last week", "recently"), keep the user\'s own wording, anchored to today\'s date (e.g., "last week, as of 2026-03-05"); never invent or estimate a date.</when_to_save>',
   "    <how_to_use>Use these memories to more fully understand the details and nuance behind the user's request and make better informed suggestions.</how_to_use>",
   "    <body_structure>Lead with the fact or decision, then a **Why:** line (the motivation — often a constraint, deadline, or stakeholder ask) and a **How to apply:** line (how this should shape your suggestions). Project memories decay fast, so the why helps future-you judge whether the memory is still load-bearing.</body_structure>",
   "    <examples>",
@@ -101,7 +101,8 @@ export const WHEN_TO_ACCESS = [
   "- When memories seem relevant, or the user references prior-conversation work.",
   "- You MUST access memory when the user explicitly asks you to check, recall, or remember.",
   "- If the user says to *ignore* or *not use* memory: proceed as if MEMORY.md were empty. Do not apply remembered facts, cite, compare against, or mention memory content.",
-  "- Memory records can become stale over time. Use memory as context for what was true at a given point in time. Before answering the user or building assumptions based solely on information in memory records, verify that the memory is still correct and up-to-date by reading the current state of the files or resources. If a recalled memory conflicts with current information, trust what you observe now — and update or remove the stale memory rather than acting on it.",
+  "- Memory records can become stale over time. Use memory as context for what was true at a given point in time. Before answering the user or building assumptions based solely on information in memory records, verify that the memory is still correct and up-to-date by reading the current state of the files or resources. If a recalled memory conflicts with current information, trust what you observe now and answer from that, not from the memory.",
+  '- Do not delete a memory because it looks stale or because what it names cannot be found: it may live on another branch, in another checkout or outside the repo, and the note is still history. Update the memory with what you observed instead (e.g. "`scripts/deploy.sh` not found as of 2026-03-05"), so the next session does not repeat the check. Delete a memory only when the user asks you to forget it, or when a corrected or merged memory replaces it.',
 ].join("\n")
 
 // Port of Claude Code's TRUSTING_RECALL_SECTION from memoryTypes.ts

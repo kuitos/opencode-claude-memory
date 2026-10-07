@@ -76,7 +76,7 @@ function str(args: Record<string, unknown>, key: string): string {
 
 export function buildMemoryToolSpecs(
   store: MemoryStore,
-  extraction: Pick<ExtractionCoordinator, "recordSave">,
+  extraction: Pick<ExtractionCoordinator, "recordSave" | "recordDelete">,
 ): MemoryToolSpec[] {
   return [
     {
@@ -106,7 +106,8 @@ export function buildMemoryToolSpecs(
         content: z
           .string()
           .describe(
-            "Memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines",
+            "Memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines when they are known (never as placeholders). " +
+              'Write a relative date the user did not pin down ("last week") as they said it, anchored to today (e.g. "last week, as of 2026-03-05"); never estimate a date',
           ),
       },
       async execute(args, ctx) {
@@ -127,13 +128,19 @@ export function buildMemoryToolSpecs(
     },
     {
       name: "memory_delete",
-      description: "Delete a memory that is outdated, wrong, or no longer relevant. Also removes it from the index.",
+      description:
+        "Delete a memory. Also removes it from the index. Use it only when the user asks you to forget something, " +
+        "when another memory replaces this one (a merge or a correction), or, during a consolidation pass, " +
+        "for an entry that is clearly obsolete. A memory that looks outdated or wrong while you answer a question " +
+        "(say, a file it names cannot be found) should be updated with memory_save to record what you observed " +
+        "and when, not deleted.",
       args: {
         file_name: z.string().describe(`File name of the memory to delete (${FILE_NAME_HINT})`),
       },
-      async execute(args) {
+      async execute(args, ctx) {
         const fileName = str(args, "file_name")
         const { deleted, trashedTo } = store.delete(fileName)
+        if (deleted) extraction.recordDelete(ctx.sessionID, fileName)
         let output = `Memory "${fileName}" not found.`
         if (deleted) {
           output = trashedTo
