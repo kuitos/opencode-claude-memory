@@ -74,11 +74,14 @@ function str(args: Record<string, unknown>, key: string): string {
   return typeof value === "string" ? value : ""
 }
 
+// The tools that change memory files; a read-only store (config `readOnly`) does not offer them.
+const WRITING_TOOLS: readonly string[] = ["memory_save", "memory_delete"]
+
 export function buildMemoryToolSpecs(
   store: MemoryStore,
   extraction: Pick<ExtractionCoordinator, "recordSave" | "recordDelete">,
 ): MemoryToolSpec[] {
-  return [
+  const specs: MemoryToolSpec[] = [
     {
       name: "memory_save",
       description:
@@ -214,4 +217,5 @@ export function buildMemoryToolSpecs(
       },
     },
   ]
+  return store.readOnly ? specs.filter((spec) => !WRITING_TOOLS.includes(spec.name)) : specs
 }

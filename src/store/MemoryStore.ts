@@ -68,6 +68,8 @@ export type ListOptions = {
 
 export type MemoryStoreOptions = {
   claudeConfigDir: string
+  // Never write: the memory folder is not created and save / delete throw (see config `readOnly`).
+  readOnly?: boolean
   // Clock for the `modified` stamp; injectable for tests.
   now?: () => Date
 }
@@ -85,6 +87,7 @@ export class MemoryStore {
   // Plugin-private state (extraction watermarks, auto-dream gate) lives next to, not inside, the
   // Claude Code project directory so Claude Code never sees it.
   readonly stateDir: string
+  readonly readOnly: boolean
   private readonly now: () => Date
 
   constructor(memoryRoot: string, options: MemoryStoreOptions) {
@@ -92,13 +95,14 @@ export class MemoryStore {
     this.gitRoot = findGitRoot(memoryRoot)
     this.canonicalRoot = findCanonicalGitRoot(memoryRoot) ?? memoryRoot
     this.claudeConfigDir = options.claudeConfigDir
+    this.readOnly = options.readOnly ?? false
     this.now = options.now ?? (() => new Date())
     const projectKey = sanitizePath(this.canonicalRoot)
     this.projectDir = join(this.claudeConfigDir, "projects", projectKey)
     this.memoryDir = join(this.projectDir, "memory")
     this.entrypoint = join(this.memoryDir, ENTRYPOINT_NAME)
     this.stateDir = join(this.claudeConfigDir, "opencode-memory", projectKey)
-    mkdirSync(this.memoryDir, { recursive: true })
+    if (!this.readOnly) mkdirSync(this.memoryDir, { recursive: true })
   }
 
   scan(): MemoryHeader[] {
@@ -127,6 +131,7 @@ export class MemoryStore {
   }
 
   save(input: SaveMemoryInput): SaveMemoryResult {
+    this.assertWritable()
     const { relativePath, filePath } = resolveMemoryFilePath(this.memoryDir, input.fileName)
     if (typeof input.name !== "string" || !input.name.trim()) {
       throw new Error("Memory name is required")
@@ -175,6 +180,7 @@ export class MemoryStore {
   // directory, as dsh-unified-memory does, so an auto-dream prune can never silently destroy
   // another tool's work.
   delete(fileName: string): DeleteMemoryResult {
+    this.assertWritable()
     const { relativePath, filePath } = resolveMemoryFilePath(this.memoryDir, fileName)
     const existing = readTextFile(filePath)
     if (existing === null) return { deleted: false }
@@ -211,6 +217,12 @@ export class MemoryStore {
 
   private writeIndex(content: string): void {
     writeFileAtomicSync(this.entrypoint, content)
+  }
+
+  // Defence in depth: in read-only mode nothing registers a writing tool or runs a writing fork, so
+  // reaching this is a bug, and it must fail rather than touch Claude Code's files.
+  private assertWritable(): void {
+    if (this.readOnly) throw new Error("Memory is read-only (readOnly: true)")
   }
 }
 

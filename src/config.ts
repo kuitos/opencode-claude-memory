@@ -39,6 +39,11 @@ export const MemoryOptionsSchema = z
       })
       .strict()
       .default({}),
+    // Use Claude Code's memory without ever writing to the Claude config directory: no memory_save /
+    // memory_delete tools, no extraction or auto-dream, no plugin state or log files, and the memory
+    // folder is not created. Recall and memory_list / memory_search / memory_read keep working. For
+    // hosts that may read what Claude Code remembers but must not add to it.
+    readOnly: z.boolean().default(false),
   })
   .strict()
 
@@ -94,8 +99,13 @@ export function parseConfig(
   env: NodeJS.ProcessEnv = process.env,
   homeDir: string = homedir(),
 ): MemoryConfig {
+  const parsed = parseMemoryOptions(options)
   return {
-    ...parseMemoryOptions(options),
+    ...parsed,
+    // Read-only switches off everything that writes, whatever the per-feature options say.
+    ...(parsed.readOnly
+      ? { extract: { ...parsed.extract, enabled: false }, autodream: { ...parsed.autodream, enabled: false } }
+      : {}),
     claudeConfigDir: resolveClaudeConfigDir(env),
     homeDir,
     agents: MEMORY_AGENTS,

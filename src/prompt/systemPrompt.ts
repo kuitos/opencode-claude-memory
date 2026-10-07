@@ -9,6 +9,7 @@ import {
   TYPES_SECTION,
   WHAT_NOT_TO_SAVE,
   WHEN_TO_ACCESS,
+  WHEN_TO_ACCESS_READ_ONLY,
 } from "./sections.js"
 
 // First line of every system prompt segment this plugin injects. The messages transform uses it to
@@ -22,7 +23,7 @@ export type BuildMemorySystemPromptOptions = {
 }
 
 export function buildMemorySystemPrompt(
-  store: Pick<MemoryStore, "memoryDir" | "projectDir" | "readIndex">,
+  store: Pick<MemoryStore, "memoryDir" | "projectDir" | "readIndex"> & { readOnly?: boolean },
   recalledMemoriesSection?: string,
   options: BuildMemorySystemPromptOptions = {},
 ): string {
@@ -48,29 +49,45 @@ export function buildMemorySystemPrompt(
     "- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.",
   ].join("\n")
 
-  const lines: string[] = [
+  // Read-only (config `readOnly`): how to read the memory, nothing about writing it.
+  const readOnlyLines = [
     AUTO_MEMORY_MARKER,
     "# Auto Memory",
     "",
-    `You have a persistent, file-based memory system at \`${store.memoryDir}\`. This directory already exists — write to it directly (do not run mkdir or check for its existence).`,
+    `You have a persistent, file-based memory system at \`${store.memoryDir}\`, shared with Claude Code. In this session it is read-only: never create, edit or delete anything in that directory, even when the user asks you to remember or forget something — tell them memory is read-only here instead.`,
     "",
-    "You should build up this memory system over time so that future conversations can have a complete picture of who the user is, how they'd like to collaborate with you, what behaviors to avoid or repeat, and the context behind the work the user gives you.",
-    "",
-    "If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.",
-    "",
-    TYPES_SECTION,
-    WHAT_NOT_TO_SAVE,
-    "",
-    howToSave,
-    "",
-    WHEN_TO_ACCESS,
+    WHEN_TO_ACCESS_READ_ONLY,
     "",
     TRUSTING_RECALL,
     "",
-    PERSISTENCE_SECTION,
-    "",
     ...buildSearchingPastContextSection(store.memoryDir, store.projectDir),
   ]
+
+  const lines: string[] = store.readOnly
+    ? readOnlyLines
+    : [
+        AUTO_MEMORY_MARKER,
+        "# Auto Memory",
+        "",
+        `You have a persistent, file-based memory system at \`${store.memoryDir}\`. This directory already exists — write to it directly (do not run mkdir or check for its existence).`,
+        "",
+        "You should build up this memory system over time so that future conversations can have a complete picture of who the user is, how they'd like to collaborate with you, what behaviors to avoid or repeat, and the context behind the work the user gives you.",
+        "",
+        "If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.",
+        "",
+        TYPES_SECTION,
+        WHAT_NOT_TO_SAVE,
+        "",
+        howToSave,
+        "",
+        WHEN_TO_ACCESS,
+        "",
+        TRUSTING_RECALL,
+        "",
+        PERSISTENCE_SECTION,
+        "",
+        ...buildSearchingPastContextSection(store.memoryDir, store.projectDir),
+      ]
 
   if (includeIndex) {
     const indexContent = store.readIndex()
@@ -81,7 +98,9 @@ export function buildMemorySystemPrompt(
       lines.push(
         `## ${ENTRYPOINT_NAME}`,
         "",
-        `Your ${ENTRYPOINT_NAME} is currently empty. When you save new memories, they will appear here.`,
+        store.readOnly
+          ? `${ENTRYPOINT_NAME} is currently empty.`
+          : `Your ${ENTRYPOINT_NAME} is currently empty. When you save new memories, they will appear here.`,
       )
     }
   }
