@@ -146,10 +146,13 @@ export async function runV2Fork(session: V2SessionApi, input: V2ForkInput): Prom
         timedOut = true
         throw new ForkSessionTimeoutError(input.title, input.timeoutMs)
       }
+      const budget = Math.min(left, cap ?? left)
       try {
-        return await deadline(`${input.title} ${what}`, Math.min(left, cap ?? left), call)
+        return await deadline(`${input.title} ${what}`, budget, call)
       } catch (error) {
-        if (error instanceof TimeoutError && remaining() <= 0) {
+        // A timer can fire a millisecond before Date.now() catches up, so a deadline that ran on the
+        // fork's remaining budget is the fork's timeout whatever remaining() reads at this point.
+        if (error instanceof TimeoutError && (budget === left || remaining() <= 0)) {
           timedOut = true
           throw new ForkSessionTimeoutError(input.title, input.timeoutMs)
         }
