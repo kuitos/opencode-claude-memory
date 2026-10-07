@@ -6,7 +6,7 @@ import {
   EXTRACT_SAVED_DURING_CONVERSATION_HEADING,
   formatLocalDate,
 } from "../src/extraction/prompts.js"
-import { WHEN_TO_ACCESS } from "../src/prompt/sections.js"
+import { FRONTMATTER_EXAMPLE, WHEN_TO_ACCESS } from "../src/prompt/sections.js"
 import { AUTO_MEMORY_MARKER, buildMemorySystemPrompt } from "../src/prompt/systemPrompt.js"
 import { ENTRYPOINT_NAME } from "../src/store/paths.js"
 import { cleanupTempDirs, makeStore } from "./helpers/index.js"
@@ -43,7 +43,7 @@ describe("buildMemorySystemPrompt", () => {
       "**Step 1**",
       "**Step 2**",
       "```markdown",
-      "type: {{user, feedback, project, reference}}",
+      "  type: {{user | feedback | project | reference}}",
       "## Memory and other forms of persistence",
       "## Searching past context",
     ]) {
@@ -74,6 +74,33 @@ describe("buildMemorySystemPrompt", () => {
     const recalled = buildMemorySystemPrompt(store, "## Recalled Memories\n\n### Test (user)\nTest content")
     expect(recalled).toContain("### Test (user)")
     expect(buildMemorySystemPrompt(store, "")).not.toContain("## Recalled Memories")
+  })
+})
+
+describe("Claude Code's current frontmatter format (#47)", () => {
+  test("the main agent is taught a kebab-case slug name and metadata.type", () => {
+    const prompt = buildMemorySystemPrompt(makeStore())
+    expect(FRONTMATTER_EXAMPLE).toContain("name: {{short-kebab-case-slug}}")
+    expect(FRONTMATTER_EXAMPLE).toContain("metadata:")
+    expect(FRONTMATTER_EXAMPLE).toContain("  type: {{user | feedback | project | reference}}")
+    expect(FRONTMATTER_EXAMPLE.some((line) => line.startsWith("type:"))).toBe(false)
+    expect(prompt).not.toContain("{{memory name}}")
+    expect(prompt).not.toContain("user_role.md")
+    expect(prompt).toContain("`user-role.md`")
+    expect(prompt).toContain("`- [Title](file.md) — one-line hook`")
+  })
+
+  test("the main agent leaves MEMORY.md to memory_save and never rewrites it whole", () => {
+    const prompt = buildMemorySystemPrompt(makeStore())
+    expect(prompt).toContain("so after it do not edit `MEMORY.md` yourself")
+    expect(prompt).toContain("never rewrite the whole file: other lines may have been written by the user")
+  })
+
+  test("the extraction fork is taught the same format", () => {
+    expect(EXTRACT_PROMPT).not.toContain("short title")
+    expect(EXTRACT_PROMPT).not.toContain("user_role")
+    expect(EXTRACT_PROMPT).toContain("`name`: the same kebab-case slug")
+    expect(EXTRACT_PROMPT).toContain("`title` (optional)")
   })
 })
 

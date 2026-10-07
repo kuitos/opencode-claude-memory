@@ -361,6 +361,40 @@ describe("MemoryStore index lines written by hand (#49)", () => {
     expect(store.readIndex()).toBe(index)
   })
 
+  test("a title names the index line of a new memory; the file keeps the slug name (#47)", () => {
+    const store = makeStore()
+    const result = store.save({ ...DEPLOY, title: "Deploy script" })
+    expect(store.readIndex()).toBe("- [Deploy script](deploy-script.md) — Deploy with scripts/deploy.sh --prod\n")
+    const raw = readFileSync(result.filePath, "utf-8")
+    expect(raw).toStartWith(
+      "---\nname: deploy-script\ndescription: Deploy with scripts/deploy.sh --prod\nmetadata:\n  type: project\n",
+    )
+    expect(raw).not.toContain("Deploy script")
+  })
+
+  test("a titled line this plugin generated follows a new description when the title is passed again", () => {
+    const store = makeStore()
+    store.save({ ...DEPLOY, title: "Deploy script" })
+    store.save({ ...DEPLOY, title: "Deploy script", description: "Deploy via the release workflow" })
+    expect(store.readIndex()).toBe("- [Deploy script](deploy-script.md) — Deploy via the release workflow\n")
+  })
+
+  test("a title retitles a line generated from the name without rewriting an unchanged file", () => {
+    const store = makeStore()
+    const first = store.save(DEPLOY)
+    const before = readFileSync(first.filePath, "utf-8")
+    expect(store.save({ ...DEPLOY, title: "Deploy script" }).unchanged).toBe(false)
+    expect(readFileSync(first.filePath, "utf-8")).toBe(before)
+    expect(store.readIndex()).toBe("- [Deploy script](deploy-script.md) — Deploy with scripts/deploy.sh --prod\n")
+    expect(store.save({ ...DEPLOY, title: "Deploy script" }).unchanged).toBe(true)
+  })
+
+  test("a title never replaces a hand-written line", () => {
+    const store = seedHandWritten()
+    store.save({ ...DEPLOY, title: "Deploy script", description: "Deploy script (not found as of 2026-10-07)" })
+    expect(store.readIndex()).toBe(HAND_WRITTEN)
+  })
+
   test("re-saving every memory (as a consolidation pass does) leaves a hand-written index byte-identical", () => {
     const store = makeStore()
     const index =

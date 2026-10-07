@@ -38,10 +38,14 @@ import {
 
 export type SaveMemoryInput = {
   fileName: string
+  // Claude Code writes a short kebab-case slug here, usually but not always the file name.
   name: string
   description: string
   type: MemoryType
   content: string
+  // Title of the memory's MEMORY.md line (`- [Title](file.md) — description`); defaults to `name`.
+  // Never stored in the file, so it only changes a line this plugin generated (see indexAfterSave).
+  title?: string
 }
 
 export type SaveMemoryResult = {
@@ -235,21 +239,25 @@ function isUnchanged(parsed: ParsedMemoryFile, relativePath: string, input: Save
 // MEMORY.md after a save. Index lines are often hand-written (Claude Code's format is
 // `- [Title](file.md) — one-line hook`, and neither part has to repeat the frontmatter), so an
 // existing pointer is kept unless it is still exactly the line this plugin generates from the
-// memory's previous name and description: only such a line follows a new name or description. A
-// memory without a pointer gains one. No other line is touched.
+// memory's previous description, titled with its previous name or with the title given now: only
+// such a line follows a new title or description. A memory without a pointer gains one, titled
+// with `title` (or the name when there is none). No other line is touched.
 function indexAfterSave(
   raw: string,
   relativePath: string,
   input: SaveMemoryInput,
   parsed: ParsedMemoryFile | null,
 ): string {
-  const pointer = buildIndexPointer(relativePath, input.name, input.description)
+  const title = input.title?.trim() || undefined
+  const pointer = buildIndexPointer(relativePath, title ?? input.name, input.description)
   const current = findIndexPointerLine(raw, relativePath)
   if (current === undefined) return upsertIndexLine(raw, relativePath, pointer)
   if (current === pointer || parsed === null) return raw
   const before = previousFields(parsed, relativePath)
-  const generatedBefore = buildIndexPointer(relativePath, before.name, before.description)
-  return current === generatedBefore ? upsertIndexLine(raw, relativePath, pointer) : raw
+  const generatedBefore = [before.name, ...(title ? [title] : [])].map((label) =>
+    buildIndexPointer(relativePath, label, before.description),
+  )
+  return generatedBefore.includes(current) ? upsertIndexLine(raw, relativePath, pointer) : raw
 }
 
 // The frontmatter keys of a memory this plugin creates (buildFrontmatter), each on one line; its own

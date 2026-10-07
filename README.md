@@ -142,7 +142,7 @@ The V2 plugin API exposes less than V1, so a few behaviours differ:
 | Aspect | Claude Code | This plugin |
 |---|---|---|
 | Memory directory | `~/.claude/projects/<sanitized canonical git root>/memory/` | identical (`sanitizePath`, worktree → main repo resolution ported byte for byte) |
-| File format | Markdown + `name` / `description` / `type` frontmatter | identical; frontmatter parsed only within the first 30 lines, as in Claude Code |
+| File format | Markdown + `name` (kebab-case slug) / `description` / `metadata.type` frontmatter | identical; older top-level `type:` still read; frontmatter parsed only within the first 30 lines, as in Claude Code |
 | Taxonomy | `user`, `feedback`, `project`, `reference` | identical |
 | `MEMORY.md` | one-line pointers, hand-organisable | read with the same truncation rules; written with minimal line-level edits, hand-written pointer lines are never replaced |
 | Sub-directories | `team/x.md` etc. | scanned, recalled and addressable from every tool |
@@ -154,11 +154,14 @@ Memory files written by either tool need no conversion in either direction.
 
 ## 📝 Memory format
 
+New memories are written the way current Claude Code writes them: a kebab-case slug as `name` (normally the file name), the type under `metadata:`. This plugin also records `metadata.origin` and `metadata.modified`. `terse-responses.md`:
+
 ```markdown
 ---
-name: User prefers terse responses
+name: terse-responses
 description: User wants concise answers without trailing summaries
-type: feedback
+metadata:
+  type: feedback
 ---
 
 Skip post-action summaries. User reads diffs directly.
@@ -166,6 +169,8 @@ Skip post-action summaries. User reads diffs directly.
 **Why:** User explicitly requested terse output style.
 **How to apply:** Don't summarize changes at the end of responses.
 ```
+
+Each memory has one line in `MEMORY.md`, `- [Title](file.md) — one-line hook`, for example `- [Terse responses](terse-responses.md) — no trailing summaries`. Older files with a title as `name` and a top-level `type:` are read as they are; nothing is migrated.
 
 ## 🔁 Migrating from v1
 
