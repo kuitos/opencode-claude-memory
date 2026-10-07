@@ -10,7 +10,7 @@ import type { OwnedSessions } from "../util/ownedSessions.js"
 import { TimeoutError } from "../util/timeout.js"
 import { AutoDream } from "./autodream.js"
 import { MaintenanceLock } from "./lock.js"
-import { buildExtractionSystemPrompt } from "./prompts.js"
+import { buildExtractionSystemPrompt, buildExtractionUserMessage } from "./prompts.js"
 import { ExtractionStateStore, migrateLegacyAutodreamState, type SessionExtractionState } from "./state.js"
 
 export { SDK_READ_TIMEOUT_MS }
@@ -394,7 +394,7 @@ export class ExtractionCoordinator {
             title: EXTRACTION_TITLE,
             agent: config.agents.extract,
             system: buildExtractionSystemPrompt(store.manifest()),
-            text: conversation,
+            text: buildExtractionUserMessage(conversation),
             timeoutMs: config.extract.timeoutMs,
             onCreated: (forkID) => {
               owned.add(forkID)

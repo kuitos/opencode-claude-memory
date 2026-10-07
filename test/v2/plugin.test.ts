@@ -240,6 +240,9 @@ describe("V2 setup: extraction", () => {
     expect(create.parentID).toBe("ses_a")
     expect(create.permissions).toEqual(mock.agents.get(MEMORY_AGENTS.extract)?.permissions)
     expect(forkPrompts(mock)[0]).toContain("I prefer tabs over spaces in Go code")
+    // The task is restated around the transcript in the prompt text itself (#48).
+    expect(forkPrompts(mock)[0]).toStartWith("Extract memories from the conversation transcript below")
+    expect(forkPrompts(mock)[0]).toContain("Do not reply to the user in the transcript")
     const first = state.getSession("ses_a")
 
     // Another process already extracted further: a stale snapshot must not move the watermark back.

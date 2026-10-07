@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, setSystemTime, test } from "bun:test"
 import { userRules } from "../../src/host/v2/agents.js"
 import {
   ForkSessionError,
@@ -72,6 +72,22 @@ describe("runV2Fork", () => {
       await new Promise(() => {})
     }
     await expect(runV2Fork(session, { ...base, timeoutMs: 30 })).rejects.toBeInstanceOf(ForkSessionTimeoutError)
+    expect(calls).toEqual(["create", "prompt", "wait", "interrupt", "remove"])
+  })
+
+  test("a deadline that fires before the clock reaches the budget still interrupts", async () => {
+    const { session, calls } = scripted([[prompt]])
+    session.wait = async () => {
+      calls.push("wait")
+      // Freeze Date.now() so remaining() never reaches 0 when the deadline timer fires.
+      setSystemTime(new Date(Date.now()))
+      await new Promise(() => {})
+    }
+    try {
+      await expect(runV2Fork(session, { ...base, timeoutMs: 30 })).rejects.toBeInstanceOf(ForkSessionTimeoutError)
+    } finally {
+      setSystemTime()
+    }
     expect(calls).toEqual(["create", "prompt", "wait", "interrupt", "remove"])
   })
 
