@@ -42,7 +42,7 @@ export function buildMemorySystemPrompt(
     `- \`${ENTRYPOINT_NAME}\` is always loaded into your conversation context — lines after ${MAX_ENTRYPOINT_LINES} will be truncated, so keep the index concise`,
     "- Keep the name, description, and type fields in memory files up-to-date with the content",
     "- Organize memory semantically by topic, not chronologically",
-    "- Update or remove memories that turn out to be wrong or outdated",
+    "- Update memories that turn out to be outdated or wrong, recording what you found; delete one only when the user asks you to forget it or when a corrected or merged memory replaces it",
     "- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.",
   ].join("\n")
 
