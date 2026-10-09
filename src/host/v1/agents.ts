@@ -4,9 +4,9 @@ import { memoryAgentDefaults } from "../../agents.js"
 import type { MemoryAgents } from "../../config.js"
 import type { AgentConfig, PluginConfig } from "./sdk.js"
 
-export function buildAgentDefaults(agents: MemoryAgents): Record<string, AgentConfig> {
+export function buildAgentDefaults(agents: MemoryAgents, readOnly = false): Record<string, AgentConfig> {
   return Object.fromEntries(
-    Object.entries(memoryAgentDefaults(agents)).map(([name, defaults]) => {
+    Object.entries(memoryAgentDefaults(agents, readOnly)).map(([name, defaults]) => {
       const config: AgentConfig = {
         mode: "all",
         hidden: true,
@@ -33,8 +33,8 @@ export class AgentRegistry {
   private readonly defaults: Record<string, AgentConfig>
   private readonly merged: Record<string, AgentConfig>
 
-  constructor(agents: MemoryAgents) {
-    this.defaults = buildAgentDefaults(agents)
+  constructor(agents: MemoryAgents, readOnly = false) {
+    this.defaults = buildAgentDefaults(agents, readOnly)
     this.merged = { ...this.defaults }
   }
 

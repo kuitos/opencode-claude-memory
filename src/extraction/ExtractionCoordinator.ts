@@ -167,6 +167,8 @@ export class ExtractionCoordinator {
     this.clearTimer(sessionID)
     this.busy.delete(sessionID)
     this.savedByMainAgent.delete(sessionID)
+    // Existing state may come from an earlier writable run; read-only mode must leave it untouched.
+    if (this.deps.config.readOnly) return
     // A deleted session never needs catching up: hosts that cannot list sessions (V2) would otherwise
     // keep spending catch-up slots and a failing transcript read on it until the 30-day prune.
     if (!this.state.getSession(sessionID)) return

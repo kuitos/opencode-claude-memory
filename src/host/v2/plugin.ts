@@ -13,7 +13,7 @@ import { RecallCoordinator } from "../../recall/RecallCoordinator.js"
 import { MemoryStore } from "../../store/MemoryStore.js"
 import { resolveMemoryRoot } from "../../store/paths.js"
 import { buildMemoryToolSpecs, type MemoryToolSpec } from "../../tools.js"
-import { getErrorMessage } from "../../util/log.js"
+import { getErrorMessage, type Logger } from "../../util/log.js"
 import { OwnedSessions } from "../../util/ownedSessions.js"
 import { withDeadline } from "../../util/timeout.js"
 import { applyMemoryAgents, type PermissionRule, sandboxRules } from "./agents.js"
@@ -58,9 +58,10 @@ export const createV2Setup =
     const directory = ctx.location.directory
     const worktree = ctx.location.project?.directory ?? directory
     const store = new MemoryStore(resolveMemoryRoot(worktree, directory), config)
-    const log = createFileLogger(store.stateDir)
+    // The log file lives under the Claude config directory, which read-only mode never writes.
+    const log: Logger = config.readOnly ? () => {} : createFileLogger(store.stateDir)
     const owned = new OwnedSessions()
-    const defaults = memoryAgentDefaults(config.agents)
+    const defaults = memoryAgentDefaults(config.agents, config.readOnly)
     const host = new V2Host({
       session: ctx.session as unknown as V2SessionApi,
       generateText: (input) => ctx.generate.text(input),
@@ -92,7 +93,9 @@ export const createV2Setup =
     }
 
     const registerHooks = async (): Promise<void> => {
-      await register("agent.transform", () => ctx.agent.transform((editor) => applyMemoryAgents(editor, config.agents)))
+      await register("agent.transform", () =>
+        ctx.agent.transform((editor) => applyMemoryAgents(editor, config.agents, config.readOnly)),
+      )
 
       await register("tool.transform", () =>
         ctx.tool.transform((editor) => {

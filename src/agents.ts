@@ -24,13 +24,16 @@ export type MemoryAgentDefaults = {
   allowedTools: readonly MemoryToolName[]
 }
 
-export function memoryAgentDefaults(agents: MemoryAgents): Record<string, MemoryAgentDefaults> {
+export function memoryAgentDefaults(agents: MemoryAgents, readOnly = false): Record<string, MemoryAgentDefaults> {
+  const recall: MemoryAgentDefaults = {
+    temperature: 0,
+    prompt: SELECT_MEMORIES_SYSTEM_PROMPT,
+    allowedTools: [],
+  }
+  // Read-only runs no extraction or auto-dream, so their agents (which may write) are not registered.
+  if (readOnly) return { [agents.recall]: recall }
   return {
-    [agents.recall]: {
-      temperature: 0,
-      prompt: SELECT_MEMORIES_SYSTEM_PROMPT,
-      allowedTools: [],
-    },
+    [agents.recall]: recall,
     [agents.extract]: {
       prompt: EXTRACT_PROMPT,
       // A legitimate extraction is a handful of memory_save calls; the step cap terminates a model

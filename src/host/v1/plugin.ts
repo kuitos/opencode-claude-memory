@@ -23,7 +23,7 @@ export const createMemoryPlugin =
     const store = new MemoryStore(resolveMemoryRoot(worktree, dir), config)
     const log = createLogger(client, dir)
     const owned = new OwnedSessions()
-    const agents = new AgentRegistry(config.agents)
+    const agents = new AgentRegistry(config.agents, config.readOnly)
     const host = client
       ? createV1Host({ client, directory: dir, toolsFor: (name) => agents.toolsFor(name) })
       : undefined

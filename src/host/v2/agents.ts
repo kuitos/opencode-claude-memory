@@ -52,7 +52,7 @@ export function userRules(rules: readonly PermissionRule[], baseline: readonly P
   return rules.filter((rule) => !base.has(ruleKey(rule))).map((rule) => ({ ...rule }))
 }
 
-export function applyMemoryAgents(editor: AgentEditor, agents: MemoryAgents): void {
+export function applyMemoryAgents(editor: AgentEditor, agents: MemoryAgents, readOnly = false): void {
   editor.update(BASELINE_PROBE_AGENT, () => {})
   const baseline = (editor.get(BASELINE_PROBE_AGENT)?.permissions ?? []).map((rule) => ({ ...rule }))
   editor.remove(BASELINE_PROBE_AGENT)
@@ -64,7 +64,7 @@ export function applyMemoryAgents(editor: AgentEditor, agents: MemoryAgents): vo
     agent.permissions = PROBE_RULES.map((rule) => ({ ...rule }))
   })
 
-  for (const [name, defaults] of Object.entries(memoryAgentDefaults(agents))) {
+  for (const [name, defaults] of Object.entries(memoryAgentDefaults(agents, readOnly))) {
     applyAgent(editor, name, defaults, baseline)
   }
 }

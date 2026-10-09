@@ -12,6 +12,7 @@ src/
 ├── tools.ts                      # MemoryToolSpec[] for memory_save / delete / list / search / read (zod/v4 args), wrapped per host; results carry their own titles
 ├── host/
 │   ├── types.ts                  # MemoryHost interface (readTranscript / listSessions / runFork / generate), TranscriptMessage, SDK_READ_TIMEOUT_MS
+│   ├── generate.ts               # buildGeneratePrompt: a generate request as text, schema in the prompt (V2 always, V1 after a StructuredOutputError)
 │   ├── v1/                       # OpenCode 1.18.29+ (`server` entry, @opencode-ai/plugin)
 │   │   ├── plugin.ts             # createMemoryPlugin: parseConfig → MemoryStore → V1 host → coordinators → Hooks
 │   │   ├── sdk.ts                # Type aliases derived from @opencode-ai/plugin (client, events, messages) + unwrapData
@@ -157,6 +158,8 @@ bun run build            # dist/ via tsconfig.build.json
 - Plugin state: `<CLAUDE_CONFIG_DIR>/opencode-memory/<same key>/extraction-state.json` (+ `extraction-state.lock` around every update, + `maintenance.lock` shared by extraction forks and auto-dream across processes, + `opencode-memory.log` on V2). A v1 `<cksum>.consolidate-lock` is migrated on first catch-up; a v1 shell hook still present in an rc file is reported with a warn log.
 - Agent names are fixed: `opencode-memory-recall`, `opencode-memory-extract`, `opencode-memory-dream`. V1's `config` hook merges defaults under whatever the user configured (`agent.<name>`); V2's `agent.transform` does the same for `agents.<name>`.
 - OpenCode dedupes `plugin` entries by package name across global/project config, last one wins — plugin options are not merged across files.
+- `readOnly` (config): nothing under `CLAUDE_CONFIG_DIR` is written — `parseConfig` forces `extract` / `autodream` off, `MemoryStore` skips `mkdir` and its `save` / `delete` throw, `buildMemoryToolSpecs` drops `memory_save` / `memory_delete`, only the recall agent is registered, V2 logs nowhere, and the prompt is the read-only variant (`WHEN_TO_ACCESS_READ_ONLY`).
+- V1 recall falls back to text: a `StructuredOutputError` from the json_schema fork switches that host to `buildGeneratePrompt` (`src/host/generate.ts`, shared with V2) and `parseSelectedMemories`, which also takes a bare JSON array.
 - Design history for v2 lives in `docs/v2/`.
 
 ## V2 notes
