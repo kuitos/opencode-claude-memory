@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { MEMORY_AGENTS, parseConfig } from "../src/config.js"
+import { ExtractionStateStore } from "../src/extraction/state.js"
 import { PERMISSIONS_PROBE_AGENT } from "../src/host/v2/agents.js"
 import { buildMemorySystemPrompt } from "../src/prompt/systemPrompt.js"
 import { MemoryStore } from "../src/store/MemoryStore.js"
@@ -17,7 +18,7 @@ import {
   tempGitRepo,
   userMessage,
 } from "./helpers/index.js"
-import { makeV2Context, runHook, setupV2 } from "./helpers/v2ctx.js"
+import { makeV2Context, runHook, setupV2, waitFor } from "./helpers/v2ctx.js"
 
 afterEach(cleanupTempDirs)
 
@@ -43,6 +44,15 @@ function seededClaudeDir(worktree: string): string {
     content: "Staging Postgres is the `pg` host.",
   })
   return claudeConfigDir
+}
+
+// A session extracted before the host switched to read-only mode.
+function seedExtractionState(worktree: string, claudeConfigDir: string): void {
+  const store = new MemoryStore(resolveMemoryRoot(worktree, worktree), { claudeConfigDir, readOnly: true })
+  const state = new ExtractionStateStore(store.stateDir)
+  state.update((data) => {
+    data.sessions.ses_existing = { lastExtractedMessageID: "msg_1", updatedAt: Date.now(), failures: 0 }
+  })
 }
 
 describe("readOnly: config and store", () => {
@@ -89,6 +99,22 @@ describe("readOnly: config and store", () => {
 })
 
 describe("readOnly: V1 plugin", () => {
+  test("deleting a previously extracted session leaves the config directory unchanged", async () => {
+    const worktree = tempGitRepo()
+    const claudeConfigDir = seededClaudeDir(worktree)
+    seedExtractionState(worktree, claudeConfigDir)
+    const before = snapshot(claudeConfigDir)
+    const hooks = await makePlugin({ worktree, claudeConfigDir, options: READ_ONLY })
+    try {
+      await hooks.event?.({
+        event: { type: "session.deleted", properties: { info: { id: "ses_existing" } } },
+      } as never)
+      expect(snapshot(claudeConfigDir)).toEqual(before)
+    } finally {
+      await hooks.dispose?.()
+    }
+  })
+
   test("offers only the reading tools and registers only the recall agent", async () => {
     const hooks = await makePlugin({ options: READ_ONLY, client: makeSelectorClient().client })
     expect(Object.keys(hooks.tool ?? {}).sort()).toEqual([...READ_TOOLS].sort())
@@ -131,6 +157,30 @@ describe("readOnly: V1 plugin", () => {
 })
 
 describe("readOnly: V2 setup", () => {
+  test("deleting a previously extracted session leaves the config directory unchanged", async () => {
+    const mock = makeV2Context({ options: READ_ONLY })
+    const claudeConfigDir = seededClaudeDir(mock.directory)
+    seedExtractionState(mock.directory, claudeConfigDir)
+    const before = snapshot(claudeConfigDir)
+    const subscribe = mock.ctx.event.subscribe.bind(mock.ctx.event)
+    let processed = false
+    mock.ctx.event.subscribe = async function* (options) {
+      for await (const event of subscribe(options)) {
+        yield event
+        // The consumer handles the event before requesting the next one.
+        processed = true
+      }
+    }
+    const { cleanup } = await setupV2(mock, claudeConfigDir)
+    try {
+      mock.emit({ type: "session.deleted", data: { sessionID: "ses_existing" } })
+      await waitFor(() => processed)
+      expect(snapshot(claudeConfigDir)).toEqual(before)
+    } finally {
+      await cleanup()
+    }
+  })
+
   test("registers only the reading tools and the recall agent, and writes no log file", async () => {
     const mock = makeV2Context({ options: READ_ONLY })
     const claudeConfigDir = tempDir("ocm-v2-claude-")
