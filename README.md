@@ -102,7 +102,8 @@ All behaviour is configured through OpenCode's own configuration. There are no `
 - When the same plugin is listed in both the global and the project `opencode.json`, OpenCode keeps the **last** declaration (project wins); options are not merged across files.
 - The three agents are registered hidden with a memory-only tool sandbox. On 1.x, override any field (`model`, `steps`, `temperature`, …) under `agent.<name>`; the plugin fills in the rest.
 - `CLAUDE_CONFIG_DIR` is honoured exactly like Claude Code does, and is the only environment variable the plugin reads.
-- `readOnly: true` uses Claude Code's memory without ever writing to the Claude config directory: no `memory_save` / `memory_delete`, no extraction or auto-dream (whatever `extract` / `autodream` say), no plugin state or log file, and the memory folder is not created. The index, recall and `memory_list` / `memory_search` / `memory_read` keep working, and the prompt tells the model the memory is read-only.
+- `readOnly: true` prevents this plugin from writing to the Claude config directory: no `memory_save` / `memory_delete`, no extraction or auto-dream (whatever `extract` / `autodream` say), no plugin state or log writes, and the memory folder is not created. The index, recall and `memory_list` / `memory_search` / `memory_read` keep working, and the prompt tells the model the memory is read-only.
+- This option does not restrict the host's shell or file-editing tools, or other plugins. To enforce read-only access for the entire host, also configure host permissions or filesystem access controls; the memory prompt alone does not enforce it.
 
 ```jsonc
 // opencode.json — OpenCode 2.x
@@ -207,9 +208,9 @@ Everything the environment variables used to control now lives under `extract`, 
 
 **Can I disable extraction, auto-dream or recall?** Yes — `extract.enabled`, `autodream.enabled`, `recall.enabled` in the plugin options.
 
-**Can OpenCode read Claude Code's memory without adding to it?** Yes — `readOnly: true`. Nothing is written under `CLAUDE_CONFIG_DIR`; see [Configuration](#-configuration).
+**Can I make this plugin read Claude Code's memory without changing it?** Yes — `readOnly: true`. The plugin does not write under `CLAUDE_CONFIG_DIR`. Enforcing read-only access for the entire host also requires host permissions or filesystem access controls; see [Configuration](#-configuration).
 
-**My recall model has no structured output.** On 1.x the selector asks for structured output first; when the server answers with a `StructuredOutputError` the plugin retries once with the schema described in the prompt and parses the text, and keeps doing that for the rest of the session.
+**My recall model has no structured output.** On 1.x each selector request asks for structured output first. If the server answers with a `StructuredOutputError`, the plugin retries that request once with the schema described in the prompt and parses the text. Later requests still try structured output: a single failure does not establish that the model lacks support. A model that consistently fails structured output therefore needs two attempts per recall request. Other errors are not retried.
 
 **Why did my first answer take a moment longer?** The system prompt waits up to `recall.waitMs` for the selector. Set it to `0` to never wait (recalled memories then appear from the second LLM call of a turn onwards).
 
