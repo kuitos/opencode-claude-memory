@@ -38,15 +38,50 @@ describe("recall without structured output", () => {
     timeoutMs: 5_000,
   }
 
-  test("retries as text once, then stays in text mode for that host", async () => {
+  test("retries as text once per request without disabling structured output for later requests", async () => {
     const { client, prompts } = textOnlyClient('["deploy.md"]')
     const host = createV1Host({ client, directory: tempGitRepo() })
     expect(await host.generate(input)).toBe('["deploy.md"]')
     expect(await host.generate(input)).toBe('["deploy.md"]')
-    expect(prompts.map((body) => body.format !== undefined)).toEqual([true, false, false])
+    expect(prompts.map((body) => body.format !== undefined)).toEqual([true, false, true, false])
     const parts = (prompts[1]?.parts ?? []) as Array<{ text: string }>
     const text = parts[0]?.text
     expect(text).toContain("Respond with only a JSON object matching this JSON schema")
+  })
+
+  test.each(["ses_first", "ses_other"])(
+    "a transient structured-output failure does not downgrade the next request from %s",
+    async (parentSessionID) => {
+      const selector = makeSelectorClient()
+      const formats: boolean[] = []
+      selector.raw.session.prompt = async (options?: unknown) => {
+        const body = (options as { body: Record<string, unknown> }).body
+        formats.push(body.format !== undefined)
+        if (formats.length === 1) return { data: { info: { error: { name: "StructuredOutputError" } }, parts: [] } }
+        if (body.format !== undefined)
+          return { data: { info: { structured: { selected_memories: ["recovered.md"] } }, parts: [] } }
+        return { data: { info: {}, parts: [{ type: "text", text: '["fallback.md"]' }] } }
+      }
+      const host = createV1Host({ client: selector.client, directory: tempGitRepo() })
+      expect(parseSelectedMemories(await host.generate({ ...input, parentSessionID: "ses_first" }))).toEqual([
+        "fallback.md",
+      ])
+      expect(parseSelectedMemories(await host.generate({ ...input, parentSessionID }))).toEqual(["recovered.md"])
+      expect(formats).toEqual([true, false, true])
+    },
+  )
+
+  test("a failed text retry rejects without another retry", async () => {
+    const selector = makeSelectorClient()
+    const formats: boolean[] = []
+    selector.raw.session.prompt = async (options?: unknown) => {
+      const body = (options as { body: Record<string, unknown> }).body
+      formats.push(body.format !== undefined)
+      return { data: { info: { error: { name: "StructuredOutputError" } }, parts: [] } }
+    }
+    const host = createV1Host({ client: selector.client, directory: tempGitRepo() })
+    await expect(host.generate(input)).rejects.toThrow("StructuredOutputError")
+    expect(formats).toEqual([true, false])
   })
 
   test("any other model error still fails the call", async () => {

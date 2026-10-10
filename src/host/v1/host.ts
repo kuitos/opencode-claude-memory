@@ -39,9 +39,6 @@ function isStructuredOutputError(error: unknown): boolean {
 }
 
 export function createV1Host({ client, directory, toolsFor }: V1HostOptions): MemoryHost {
-  // Cleared by the first StructuredOutputError: from then on this host describes the schema in the
-  // prompt and the caller parses the text, as the V2 host always does.
-  let structuredOutput = true
   return {
     async readTranscript(sessionID) {
       const response = await withDeadline("session.messages", SDK_READ_TIMEOUT_MS, (signal) =>
@@ -107,12 +104,13 @@ export function createV1Host({ client, directory, toolsFor }: V1HostOptions): Me
           onFinished: input.onFinished,
           onCleanupFailed: input.onCleanupFailed,
         })
-      if (structuredOutput && input.schema) {
+      if (input.schema) {
         try {
           return forkAnswerText(await run(true))
         } catch (error) {
           if (!isStructuredOutputError(error)) throw error
-          structuredOutput = false
+          // One failed answer does not establish a model capability. Retry only this request as
+          // text, leaving later requests (in this session or another) free to use structured output.
         }
       }
       return forkAnswerText(await run(false))
