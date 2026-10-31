@@ -73,7 +73,7 @@ The hook names below are OpenCode 1.x's; on 2.x the same steps run on the V2 plu
 4. **Auto-dream** — after each extracted session the gate is evaluated (`autodream.minHours` since the last pass **and** `autodream.minSessions` extracted since). When it passes, `opencode-memory-dream` runs with all five memory tools. A lock file prevents two OpenCode processes from consolidating at once.
 5. **Ignore memory** — "ignore memory" in a user message switches memory off for the rest of the session (no index, no recall); "use memory again" switches it back on.
 
-State that is private to the plugin (watermarks, auto-dream gate, lock and, on OpenCode 2.x, the log file) lives in `<CLAUDE_CONFIG_DIR>/opencode-memory/<project>/`, never inside the Claude Code project directory.
+State that is private to the plugin (watermarks, auto-dream gate, lock and, on OpenCode 2.x, the log file) lives under `<CLAUDE_CONFIG_DIR>/opencode-memory/`, never inside the memory directory. The default location is `<project>/`; custom memory directories use the namespaces described below.
 
 ## 🔧 Configuration
 
@@ -125,9 +125,26 @@ All behaviour is configured through OpenCode's own configuration. There are no `
 - Agent overrides live under `agents.<name>` and use 2.x agent fields (`model`, `steps`, `permissions`, …). The plugin's sandbox rules (`*` deny, then allow for the agent's memory tools) come first and your own `permissions` after them; 2.x applies the last matching rule, so your rule wins.
 - The main agent needs no extra permission on 2.x's default `build` agent, which allows everything. If you restrict permissions (for example `*` → `ask` or `deny`), add `{ "action": "memory_*", "resource": "*", "effect": "allow" }` to your `permissions` so the memory tools are neither blocked nor prompted for.
 
+**Custom memory directory.** Set `autoMemoryDirectory` in the plugin options to use a fixed memory directory, matching [Claude Code's setting](https://code.claude.com/docs/en/settings-reference#automemorydirectory). For example, on OpenCode 2.x:
+
+```jsonc
+{
+  "plugins": [
+    { "package": "opencode-claude-memory", "options": { "autoMemoryDirectory": "~/shared-memory" } }
+  ]
+}
+```
+
+The same option works in the 1.x plugin options. Configure the same path as `autoMemoryDirectory` in Claude Code's settings to share this store between both tools; this plugin reads OpenCode options, not Claude Code settings files. OpenCode's plugin declaration precedence above still applies.
+
+- The value is the **final memory directory**: `~/shared-memory/MEMORY.md` and its topic files. No project name or `memory/` suffix is appended. All projects configured with the same path share that store; it replaces their default memory directories rather than merging with them. Existing memories are not moved.
+- Path handling matches Claude Code **2.1.292**: expand `~/` (also `~\`), normalise the path and Unicode (NFC), and retain one trailing separator. The directory is not resolved against a Git root. Relative or empty paths, filesystem roots, home-only `~/`, tilde paths escaping the home directory, NUL bytes and network/device roots disable the override and fall back to the default project directory. Whitespace is not trimmed and environment variables are not expanded. Non-string values remain configuration errors.
+- Working directories and session/event handling retain their actual project scope. Watermarks, the auto-dream gate, trash and logs remain project-scoped and are also keyed by the target directory (`<project>/memory-stores/<directory-hash>/`), so switching stores does not reuse another store's watermarks. Within one `CLAUDE_CONFIG_DIR`, extraction and auto-dream targeting the same physical directory share a maintenance lock, including directory symlinks and overrides pointing to a default project store. Auto-dream thresholds remain per project.
+- `readOnly: true` applies to a custom directory too: it is not created, memory writes are disabled, and no plugin state or logs are written.
+
 **Models for the memory agents.** OpenCode Zen's free models (e.g. `opencode/big-pickle`) reject every request whose tool list lacks OpenCode's `shell` tool (HTTP 403, *"OpenCode's free tier can only be used from within OpenCode"*). The sandboxed extraction and auto-dream forks are exactly such requests on both 1.x and 2.x, and so is recall on 2.x. On a free Zen model, extraction, auto-dream and (on 2.x) recall therefore fail. Configure a paid model for `opencode-memory-extract`, `opencode-memory-dream` and `opencode-memory-recall` (e.g. `opencode/gpt-6-luna`); the main agent can stay on a free model.
 
-**Logs.** On 1.x logs go to the OpenCode service log (`opencode` log directory, service `opencode-claude-memory`). 2.x gives plugins no log API, so the plugin writes `<CLAUDE_CONFIG_DIR>/opencode-memory/<project>/opencode-memory.log` instead (rotated at about 1 MB).
+**Logs.** On 1.x logs go to the OpenCode service log (`opencode` log directory, service `opencode-claude-memory`). 2.x gives plugins no log API, so the plugin writes `opencode-memory.log` in its state directory instead (rotated at about 1 MB). This is `<CLAUDE_CONFIG_DIR>/opencode-memory/<project>/` by default, or the custom-store state namespace described above.
 
 ## 🆕 Differences on OpenCode 2.x
 
@@ -144,7 +161,7 @@ The V2 plugin API exposes less than V1, so a few behaviours differ:
 
 | Aspect | Claude Code | This plugin |
 |---|---|---|
-| Memory directory | `~/.claude/projects/<sanitized canonical git root>/memory/` | identical (`sanitizePath`, worktree → main repo resolution ported byte for byte) |
+| Memory directory | `~/.claude/projects/<sanitized canonical git root>/memory/`, or `autoMemoryDirectory` | same default layout and custom-directory path semantics (verified against Claude Code 2.1.292) |
 | File format | Markdown + `name` (kebab-case slug) / `description` / `metadata.type` frontmatter | identical; older top-level `type:` still read; frontmatter parsed only within the first 30 lines, as in Claude Code |
 | Taxonomy | `user`, `feedback`, `project`, `reference` | identical |
 | `MEMORY.md` | one-line pointers, hand-organisable | read with the same truncation rules; written with minimal line-level edits, hand-written pointer lines are never replaced |
@@ -204,7 +221,7 @@ Everything the environment variables used to control now lives under `extract`, 
 
 **Do I need to migrate existing memory?** No. Existing Claude Code memory files are used as they are.
 
-**Where is data stored?** `~/.claude/projects/<project>/memory/` (or `$CLAUDE_CONFIG_DIR/projects/...`). Plugin state lives in `$CLAUDE_CONFIG_DIR/opencode-memory/<project>/`. Memories the plugin deletes that are not purely its own (Claude Code's, another tool's, or one of its own that another tool has since edited) are copied to `trash/<timestamp>/` there first.
+**Where is data stored?** `~/.claude/projects/<project>/memory/` (or `$CLAUDE_CONFIG_DIR/projects/...`), unless `autoMemoryDirectory` selects a custom store. Plugin state lives under `$CLAUDE_CONFIG_DIR/opencode-memory/`, scoped by project and, for custom stores, target directory. Memories the plugin deletes that are not purely its own (Claude Code's, another tool's, or one of its own that another tool has since edited) are copied to `trash/<timestamp>/` in that state directory first.
 
 **Can I disable extraction, auto-dream or recall?** Yes — `extract.enabled`, `autodream.enabled`, `recall.enabled` in the plugin options.
 

@@ -1,6 +1,7 @@
 import { homedir } from "node:os"
 import { join } from "node:path"
 import { z } from "zod"
+import { resolveAutoMemoryDirectory } from "./store/autoMemoryDirectory.js"
 
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 
@@ -11,6 +12,8 @@ const timeoutMs = (fallback: number) => z.number().int().positive().max(MAX_TIME
 // falling back to defaults.
 export const MemoryOptionsSchema = z
   .object({
+    // Final memory directory, with Claude Code's autoMemoryDirectory path semantics.
+    autoMemoryDirectory: z.string().optional(),
     extract: z
       .object({
         enabled: z.boolean().default(true),
@@ -61,7 +64,7 @@ export type MemoryAgents = typeof MEMORY_AGENTS
 
 export type MemoryConfig = MemoryOptions & {
   claudeConfigDir: string
-  // The user's home directory: where v1's shell hook would be installed (read-only detection).
+  // The user's home directory: tilde expansion and read-only detection of v1's shell hook.
   homeDir: string
   agents: MemoryAgents
 }
@@ -102,6 +105,7 @@ export function parseConfig(
   const parsed = parseMemoryOptions(options)
   return {
     ...parsed,
+    autoMemoryDirectory: resolveAutoMemoryDirectory(parsed.autoMemoryDirectory, homeDir),
     // Read-only switches off everything that writes, whatever the per-feature options say.
     ...(parsed.readOnly
       ? { extract: { ...parsed.extract, enabled: false }, autodream: { ...parsed.autodream, enabled: false } }
