@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { homedir } from "node:os"
-import { join } from "node:path"
+import { homedir, tmpdir } from "node:os"
+import { join, sep } from "node:path"
 import {
   MEMORY_AGENTS,
   MemoryConfigError,
@@ -70,5 +70,13 @@ describe("parseConfig", () => {
   test("schema is exported for user-side validation", () => {
     expect(MemoryOptionsSchema.safeParse({ extract: { enabled: false } }).success).toBe(true)
     expect(MemoryOptionsSchema.safeParse({ nope: true }).success).toBe(false)
+  })
+
+  test("resolves autoMemoryDirectory using the injected home, independent of CLAUDE_CONFIG_DIR", () => {
+    const home = join(tmpdir(), "ocm-injected-home")
+    const config = parseConfig({ autoMemoryDirectory: "~/memory" }, { CLAUDE_CONFIG_DIR: "/different/config" }, home)
+    expect(config.autoMemoryDirectory).toBe(`${join(home, "memory")}${sep}`)
+    expect(parseConfig({ autoMemoryDirectory: "relative" }, {}, home).autoMemoryDirectory).toBeUndefined()
+    expect(() => parseConfig({ autoMemoryDirectory: 123 }, {}, home)).toThrow(/autoMemoryDirectory/)
   })
 })

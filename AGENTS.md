@@ -34,6 +34,7 @@ src/
 │       ├── transcript.ts         # V2 messages → TranscriptMessage
 │       └── log.ts                # File logger <stateDir>/opencode-memory.log, rotated at LOG_MAX_BYTES
 ├── store/
+│   ├── autoMemoryDirectory.ts    # Claude Code 2.1.292 custom directory validation/expansion (pure)
 │   ├── frontmatter.ts            # THE memory file format: MEMORY_TYPES, parseFrontmatter (30-line limit), buildFrontmatter
 │   ├── paths.ts                  # Pure: validateMemoryFileName (sub-paths), sanitizePath, findCanonicalGitRoot, resolveMemoryRoot
 │   ├── scan.ts                   # THE scanner: MemoryHeader/MemoryEntry, defaults decided once, manifest, surfaceKey
@@ -82,7 +83,7 @@ test/
 | V2 setup / hooks / event stream | `src/host/v2/plugin.ts`, `src/host/v2/events.ts` |
 | V2 transcript mapping | `src/host/v2/transcript.ts` |
 | Change the memory file format | `src/store/frontmatter.ts` |
-| Path resolution / worktree sharing / file-name rules | `src/store/paths.ts`, `src/store/MemoryStore.ts` |
+| Path resolution / worktree sharing / file-name rules | `src/store/paths.ts`, `src/store/autoMemoryDirectory.ts`, `src/store/MemoryStore.ts` |
 | `MEMORY.md` editing rules | `src/store/indexFile.ts` |
 | What the main agent sees about memory | `src/prompt/systemPrompt.ts`, `src/prompt/sections.ts` |
 | Which memories are recalled and when | `src/recall/RecallCoordinator.ts`, `src/recall/selector.ts` |
@@ -153,9 +154,10 @@ bun run build            # dist/ via tsconfig.build.json
 ## Notes
 
 - Memory directory: `<CLAUDE_CONFIG_DIR>/projects/<sanitizePath(canonicalGitRoot)>/memory/`, shared with Claude Code. `sanitizePath` / `djb2Hash` are exact copies of Claude Code's.
+- `autoMemoryDirectory` overrides the final memory directory with Claude Code 2.1.292 path semantics (`store/autoMemoryDirectory.ts`), without changing project/session identity. Invalid strings fall back to the default; only plugin options are read, not Claude settings files. Custom-store state is isolated by project and target directory; `MemoryStore.maintenanceLockPath` coordinates all projects targeting the same physical store within a Claude config directory. Never use the project-scoped `ExtractionStateStore.lockPath` for a custom store's maintenance operations.
 - File format taught to the models (prompts, `memory_save` args): Claude Code's current one, a kebab-case slug `name` (not necessarily the file name) and `metadata.type`; old files (title `name`, top-level `type:`) are read as they are and never migrated. `memory_save`'s optional `title` only names a new or plugin-generated `MEMORY.md` line.
 - Provenance: files this plugin creates carry `metadata.origin: opencode`; edits to other tools' files add `metadata.updatedBy: opencode` and keep every other frontmatter line. Deleting a memory that is not purely its own (another tool's, or its own once another tool has edited it: extra frontmatter keys, or an mtime more than 2 s from its `modified`) first copies it to `<stateDir>/trash/<timestamp>/`.
-- Plugin state: `<CLAUDE_CONFIG_DIR>/opencode-memory/<same key>/extraction-state.json` (+ `extraction-state.lock` around every update, + `maintenance.lock` shared by extraction forks and auto-dream across processes, + `opencode-memory.log` on V2). A v1 `<cksum>.consolidate-lock` is migrated on first catch-up; a v1 shell hook still present in an rc file is reported with a warn log.
+- Default plugin state: `<CLAUDE_CONFIG_DIR>/opencode-memory/<same key>/extraction-state.json` (+ `extraction-state.lock` around every update, + `maintenance.lock` shared by extraction forks and auto-dream across processes, + `opencode-memory.log` on V2). Custom-store state and maintenance locks use the namespaces described above. A v1 `<cksum>.consolidate-lock` is migrated on first catch-up; a v1 shell hook still present in an rc file is reported with a warn log.
 - Agent names are fixed: `opencode-memory-recall`, `opencode-memory-extract`, `opencode-memory-dream`. V1's `config` hook merges defaults under whatever the user configured (`agent.<name>`); V2's `agent.transform` does the same for `agents.<name>`.
 - OpenCode dedupes `plugin` entries by package name across global/project config, last one wins — plugin options are not merged across files.
 - `readOnly` (config): the plugin writes nothing under `CLAUDE_CONFIG_DIR` — `parseConfig` forces `extract` / `autodream` off, `MemoryStore` skips `mkdir` and its `save` / `delete` throw, `buildMemoryToolSpecs` drops `memory_save` / `memory_delete`, only the recall agent is registered, session deletion leaves persistent state unchanged, V2 logs nowhere, and the prompt is the read-only variant (`WHEN_TO_ACCESS_READ_ONLY`). Host shell/file tools and other plugins are outside this guarantee; enforced read-only access requires host permissions or filesystem access controls.

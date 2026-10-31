@@ -46,7 +46,7 @@ export class AutoDream {
 
   constructor(private readonly deps: AutoDreamDeps) {
     this.now = deps.now ?? Date.now
-    this.lock = deps.lock ?? new MaintenanceLock(deps.state.lockPath, this.now)
+    this.lock = deps.lock ?? new MaintenanceLock(deps.store.maintenanceLockPath, this.now)
   }
 
   // Called from the extraction coordinator's persisted update after a session was extracted.

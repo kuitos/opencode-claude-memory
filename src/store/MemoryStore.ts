@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto"
 import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { writeFileAtomicSync } from "../util/exclusiveFile.js"
+import { resolveAutoMemoryDirectory } from "./autoMemoryDirectory.js"
 import {
   buildFrontmatter,
   editFrontmatter,
@@ -66,8 +68,30 @@ export type ListOptions = {
   sort?: "name" | "mtime"
 }
 
+function realDirectory(directory: string): string {
+  const absolute = resolve(directory)
+  try {
+    // Filesystems such as ext4 can keep canonically equivalent Unicode names distinct.
+    return realpathSync.native(absolute)
+  } catch {
+    // Resolve existing ancestors too: read-only stores and private state may not exist yet,
+    // but their parents can still contain symlinks.
+    const parent = dirname(absolute)
+    return parent === absolute ? absolute : join(realDirectory(parent), basename(absolute))
+  }
+}
+
+function containsDirectory(root: string, directory: string): boolean {
+  const fromRoot = relative(root, directory)
+  return fromRoot === "" || (!isAbsolute(fromRoot) && fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`))
+}
+
 export type MemoryStoreOptions = {
   claudeConfigDir: string
+  // Overrides the final directory, not the project's identity. Hosts pass parseConfig's resolved
+  // value; direct callers may supply a raw value and an injected home directory for tilde expansion.
+  autoMemoryDirectory?: string
+  homeDir?: string
   // Never write: the memory folder is not created and save / delete throw (see config `readOnly`).
   readOnly?: boolean
   // Clock for the `modified` stamp; injectable for tests.
@@ -83,10 +107,13 @@ export class MemoryStore {
   readonly claudeConfigDir: string
   readonly projectDir: string
   readonly memoryDir: string
+  readonly usesDefaultMemoryDirectory: boolean
   readonly entrypoint: string
   // Plugin-private state (extraction watermarks, auto-dream gate) lives next to, not inside, the
   // Claude Code project directory so Claude Code never sees it.
   readonly stateDir: string
+  // Shared by every project targeting this memory directory; watermarks stay project-scoped.
+  readonly maintenanceLockPath: string
   readonly readOnly: boolean
   private readonly now: () => Date
 
@@ -99,10 +126,28 @@ export class MemoryStore {
     this.now = options.now ?? (() => new Date())
     const projectKey = sanitizePath(this.canonicalRoot)
     this.projectDir = join(this.claudeConfigDir, "projects", projectKey)
-    this.memoryDir = join(this.projectDir, "memory")
+    const defaultMemoryDir = join(this.projectDir, "memory")
+    this.memoryDir = resolveAutoMemoryDirectory(options.autoMemoryDirectory, options.homeDir ?? "") ?? defaultMemoryDir
     this.entrypoint = join(this.memoryDir, ENTRYPOINT_NAME)
-    this.stateDir = join(this.claudeConfigDir, "opencode-memory", projectKey)
+    const directory = realDirectory(this.memoryDir)
+    const privateRoot = join(this.claudeConfigDir, "opencode-memory")
+    const privateDirectory = realDirectory(privateRoot)
+    if (containsDirectory(directory, privateDirectory) || containsDirectory(privateDirectory, directory)) {
+      throw new Error(`Memory directory must not overlap the plugin state directory: ${privateRoot}`)
+    }
     if (!this.readOnly) mkdirSync(this.memoryDir, { recursive: true })
+    this.usesDefaultMemoryDirectory = directory === realDirectory(defaultMemoryDir)
+    const key = createHash("sha256").update(directory).digest("hex")
+    const projectStateDir = join(privateRoot, projectKey)
+    this.stateDir = this.usesDefaultMemoryDirectory ? projectStateDir : join(projectStateDir, "memory-stores", key)
+    // Recognise the default Claude directory layout too, so an explicit override pointing to
+    // another project's default store shares its existing maintenance lock.
+    const fromProjects = relative(realDirectory(join(this.claudeConfigDir, "projects")), directory)
+    const parts = fromProjects.split(sep)
+    this.maintenanceLockPath =
+      !isAbsolute(fromProjects) && parts.length === 2 && parts[0] !== ".." && parts[1] === "memory"
+        ? join(privateRoot, parts[0] ?? "", "maintenance.lock")
+        : join(privateRoot, "memory-stores", key, "maintenance.lock")
   }
 
   scan(): MemoryHeader[] {

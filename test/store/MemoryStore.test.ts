@@ -1,12 +1,26 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
+import { createHash } from "node:crypto"
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import { join } from "node:path"
+import { MaintenanceLock } from "../../src/extraction/lock.js"
+import { ExtractionStateStore } from "../../src/extraction/state.js"
 import { MemoryStore } from "../../src/store/MemoryStore.js"
 import * as paths from "../../src/store/paths.js"
 import { sanitizePath } from "../../src/store/paths.js"
 import {
   canSymlink,
   cleanupTempDirs,
+  makeConfig,
   makeStore,
   seedMemory,
   tempDir,
@@ -37,6 +51,162 @@ describe("MemoryStore paths", () => {
     const store = new MemoryStore(dir, { claudeConfigDir: tempDir("claude-") })
     const inferred = paths.findCanonicalGitRoot(dir)
     expect(store.canonicalRoot).toBe(inferred ?? dir)
+  })
+
+  test("direct store callers get the same invalid-path fallback and injected-home expansion", () => {
+    const root = tempGitRepo()
+    const claude = tempDir()
+    const home = tempDir()
+    const fallback = new MemoryStore(root, { claudeConfigDir: claude, autoMemoryDirectory: "relative" })
+    expect(fallback.memoryDir).toBe(join(fallback.projectDir, "memory"))
+    const expanded = new MemoryStore(root, { claudeConfigDir: claude, autoMemoryDirectory: "~/notes", homeDir: home })
+    expect(expanded.entrypoint).toBe(join(home, "notes", "MEMORY.md"))
+  })
+
+  test("shares only the explicit memory directory while preserving each project's identity and state", () => {
+    const claude = tempDir()
+    const firstRoot = tempGitRepo()
+    const secondRoot = tempGitRepo()
+    const directory = join(secondRoot, "notes")
+    const config = makeConfig({ autoMemoryDirectory: directory }, claude)
+    const defaultStore = new MemoryStore(firstRoot, { claudeConfigDir: claude })
+    seedMemory(defaultStore, { fileName: "default-only" })
+    const first = new MemoryStore(firstRoot, config)
+    const second = new MemoryStore(secondRoot, config)
+
+    expect(first.memoryDir).toBe(config.autoMemoryDirectory as string)
+    expect(first.canonicalRoot).toBe(firstRoot.normalize("NFC"))
+    expect(second.canonicalRoot).toBe(secondRoot.normalize("NFC"))
+    expect(first.projectDir).toBe(defaultStore.projectDir)
+    expect(first.stateDir).not.toBe(second.stateDir)
+    expect(first.stateDir).not.toBe(defaultStore.stateDir)
+    expect(first.maintenanceLockPath).toBe(second.maintenanceLockPath)
+    seedMemory(first, { fileName: "shared", content: "Available from both projects" })
+    expect(second.read("shared")?.body).toBe("Available from both projects")
+    expect(second.list().map((entry) => entry.filename)).toEqual(["shared.md"])
+    expect(second.readIndex()).toContain("shared.md")
+    expect(second.readIndex()).not.toContain("default-only")
+
+    const lock = new MaintenanceLock(first.maintenanceLockPath)
+    const other = new MaintenanceLock(second.maintenanceLockPath)
+    try {
+      expect(lock.tryAcquire()).toBe(true)
+      expect(other.tryAcquire()).toBe(false)
+    } finally {
+      lock.release()
+      other.release()
+    }
+    const different = new MemoryStore(firstRoot, makeConfig({ autoMemoryDirectory: join(tempDir(), "other") }, claude))
+    expect(different.stateDir).not.toBe(first.stateDir)
+    expect(different.maintenanceLockPath).not.toBe(first.maintenanceLockPath)
+  })
+
+  test("an override pointing to a default store shares that store's maintenance lock", () => {
+    const claude = tempDir()
+    const original = new MemoryStore(tempGitRepo(), { claudeConfigDir: claude })
+    const override = new MemoryStore(tempGitRepo(), makeConfig({ autoMemoryDirectory: original.memoryDir }, claude))
+    expect(override.maintenanceLockPath).toBe(original.maintenanceLockPath)
+    expect(original.maintenanceLockPath).toBe(join(original.stateDir, "maintenance.lock"))
+  })
+
+  test.skipIf(!canSymlink())("preserves a custom directory symlink but shares the physical store's lock", () => {
+    const claude = tempDir()
+    const directory = tempDir()
+    const alias = join(tempDir(), "alias")
+    symlinkSync(directory, alias, "dir")
+    const first = new MemoryStore(tempGitRepo(), makeConfig({ autoMemoryDirectory: directory }, claude))
+    const second = new MemoryStore(tempGitRepo(), makeConfig({ autoMemoryDirectory: alias }, claude))
+    expect(second.memoryDir).toContain(alias)
+    expect(second.maintenanceLockPath).toBe(first.maintenanceLockPath)
+  })
+
+  test.skipIf(!canSymlink())("a symlink alias of the default store retains its persisted state and lock", () => {
+    const root = tempGitRepo()
+    const claude = tempDir()
+    const original = new MemoryStore(root, { claudeConfigDir: claude })
+    const state = new ExtractionStateStore(original.stateDir)
+    state.update((data) => {
+      data.sessions.ses_existing = { lastExtractedMessageID: "a", updatedAt: Date.now(), failures: 0 }
+      data.autodream.lastConsolidatedAt = 123
+    })
+    const alias = join(tempDir(), "alias")
+    symlinkSync(original.memoryDir, alias, "dir")
+    const override = new MemoryStore(root, makeConfig({ autoMemoryDirectory: alias }, claude))
+    expect(override.stateDir).toBe(original.stateDir)
+    expect(new ExtractionStateStore(override.stateDir).read()).toEqual(state.read())
+    expect(override.maintenanceLockPath).toBe(original.maintenanceLockPath)
+  })
+
+  test.skipIf(!canSymlink())("hashes exact filesystem realpaths without Unicode normalization", () => {
+    const root = tempGitRepo()
+    const claude = tempDir()
+    const parent = tempDir()
+    const stores = ["é", "e\u0301"].map((name, index) => {
+      const directory = join(parent, name)
+      mkdirSync(directory, { recursive: true })
+      const alias = join(tempDir(), `alias-${index}`)
+      symlinkSync(directory, alias, "dir")
+      const store = new MemoryStore(root, makeConfig({ autoMemoryDirectory: alias }, claude))
+      const key = createHash("sha256").update(realpathSync.native(directory)).digest("hex")
+      expect(store.stateDir).toBe(
+        join(claude, "opencode-memory", sanitizePath(store.canonicalRoot), "memory-stores", key),
+      )
+      expect(store.maintenanceLockPath).toBe(join(claude, "opencode-memory", "memory-stores", key, "maintenance.lock"))
+      return store
+    })
+    // Linux permits both spellings as distinct directories; macOS usually aliases them.
+    const [first, second] = stores as [MemoryStore, MemoryStore]
+    if (statSync(first.memoryDir).ino !== statSync(second.memoryDir).ino) {
+      expect(first.stateDir).not.toBe(second.stateDir)
+      expect(first.maintenanceLockPath).not.toBe(second.maintenanceLockPath)
+    }
+  })
+
+  test.each([false, true])(
+    "rejects memory roots overlapping private state before writing (readOnly: %s)",
+    (readOnly) => {
+      const root = tempGitRepo()
+      const claude = join(tempDir(), "claude")
+      const privateRoot = join(claude, "opencode-memory")
+      for (const autoMemoryDirectory of [claude, privateRoot, join(privateRoot, "nested")]) {
+        expect(() => new MemoryStore(root, { claudeConfigDir: claude, autoMemoryDirectory, readOnly })).toThrow(
+          /overlap.*plugin state/i,
+        )
+        expect(existsSync(claude)).toBe(false)
+      }
+      // A sibling with the same string prefix is safe.
+      const store = new MemoryStore(root, {
+        claudeConfigDir: claude,
+        autoMemoryDirectory: `${privateRoot}-notes`,
+        readOnly,
+      })
+      expect(store.memoryDir).toContain(`${privateRoot}-notes`)
+    },
+  )
+
+  test.skipIf(!canSymlink())("rejects state overlap through aliases even when the state root does not exist", () => {
+    const root = tempGitRepo()
+    const directory = tempDir()
+    const alias = join(tempDir(), "alias")
+    symlinkSync(directory, alias, "dir")
+    for (const [claudeConfigDir, autoMemoryDirectory] of [
+      [alias, directory],
+      [directory, alias],
+    ] as const) {
+      expect(() => new MemoryStore(root, { claudeConfigDir, autoMemoryDirectory })).toThrow(/overlap.*plugin state/i)
+    }
+    expect(existsSync(join(directory, "opencode-memory"))).toBe(false)
+  })
+
+  test("read-only mode neither creates the custom directory nor writes private state", () => {
+    const claude = tempDir()
+    const directory = join(tempDir(), "missing")
+    const store = new MemoryStore(tempGitRepo(), makeConfig({ autoMemoryDirectory: directory, readOnly: true }, claude))
+    expect(store.memoryDir).toContain(directory)
+    expect(existsSync(directory)).toBe(false)
+    expect(existsSync(store.stateDir)).toBe(false)
+    expect(existsSync(store.maintenanceLockPath)).toBe(false)
+    expect(() => seedMemory(store, { fileName: "blocked" })).toThrow(/read.only/i)
   })
 
   test("resolves paths once: later git changes do not move the memory directory", () => {

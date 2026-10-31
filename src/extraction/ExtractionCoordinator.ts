@@ -128,7 +128,7 @@ export class ExtractionCoordinator {
   constructor(protected readonly deps: ExtractionCoordinatorDeps) {
     this.now = deps.now ?? Date.now
     this.state = deps.state ?? new ExtractionStateStore(deps.store.stateDir, this.now)
-    this.lock = deps.lock ?? new MaintenanceLock(this.state.lockPath, this.now)
+    this.lock = deps.lock ?? new MaintenanceLock(deps.store.maintenanceLockPath, this.now)
     this.autodream = deps.host
       ? new AutoDream({ ...deps, host: deps.host, state: this.state, now: this.now, lock: this.lock })
       : undefined
@@ -220,11 +220,14 @@ export class ExtractionCoordinator {
     if (!host) return
 
     this.warnLegacyShellHook()
-    migrateLegacyAutodreamState(this.state, `${store.claudeConfigDir}/opencode-memory`, [
-      store.gitRoot ?? store.memoryRoot,
-      store.memoryRoot,
-      store.canonicalRoot,
-    ])
+    // The old shell hook maintained the default project store, never a custom destination.
+    if (store.usesDefaultMemoryDirectory) {
+      migrateLegacyAutodreamState(this.state, `${store.claudeConfigDir}/opencode-memory`, [
+        store.gitRoot ?? store.memoryRoot,
+        store.memoryRoot,
+        store.canonicalRoot,
+      ])
+    }
 
     if (config.extract.catchUpLimit <= 0) return
     let sessions: SessionSummary[] | undefined
