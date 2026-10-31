@@ -221,7 +221,7 @@ export class ExtractionCoordinator {
 
     this.warnLegacyShellHook()
     // The old shell hook maintained the default project store, never a custom destination.
-    if (config.autoMemoryDirectory === undefined) {
+    if (store.usesDefaultMemoryDirectory) {
       migrateLegacyAutodreamState(this.state, `${store.claudeConfigDir}/opencode-memory`, [
         store.gitRoot ?? store.memoryRoot,
         store.memoryRoot,

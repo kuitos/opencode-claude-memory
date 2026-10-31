@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "node:fs"
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { writeFileAtomicSync } from "../util/exclusiveFile.js"
 import { resolveAutoMemoryDirectory } from "./autoMemoryDirectory.js"
 import {
@@ -69,12 +69,21 @@ export type ListOptions = {
 }
 
 function realDirectory(directory: string): string {
+  const absolute = resolve(directory)
   try {
-    return realpathSync.native(directory).normalize("NFC")
+    // Filesystems such as ext4 can keep canonically equivalent Unicode names distinct.
+    return realpathSync.native(absolute)
   } catch {
-    // Read-only mode may point at a directory that does not exist yet.
-    return resolve(directory).normalize("NFC")
+    // Resolve existing ancestors too: read-only stores and private state may not exist yet,
+    // but their parents can still contain symlinks.
+    const parent = dirname(absolute)
+    return parent === absolute ? absolute : join(realDirectory(parent), basename(absolute))
   }
+}
+
+function containsDirectory(root: string, directory: string): boolean {
+  const fromRoot = relative(root, directory)
+  return fromRoot === "" || (!isAbsolute(fromRoot) && fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`))
 }
 
 export type MemoryStoreOptions = {
@@ -98,6 +107,7 @@ export class MemoryStore {
   readonly claudeConfigDir: string
   readonly projectDir: string
   readonly memoryDir: string
+  readonly usesDefaultMemoryDirectory: boolean
   readonly entrypoint: string
   // Plugin-private state (extraction watermarks, auto-dream gate) lives next to, not inside, the
   // Claude Code project directory so Claude Code never sees it.
@@ -119,22 +129,25 @@ export class MemoryStore {
     const defaultMemoryDir = join(this.projectDir, "memory")
     this.memoryDir = resolveAutoMemoryDirectory(options.autoMemoryDirectory, options.homeDir ?? "") ?? defaultMemoryDir
     this.entrypoint = join(this.memoryDir, ENTRYPOINT_NAME)
-    if (!this.readOnly) mkdirSync(this.memoryDir, { recursive: true })
     const directory = realDirectory(this.memoryDir)
+    const privateRoot = join(this.claudeConfigDir, "opencode-memory")
+    const privateDirectory = realDirectory(privateRoot)
+    if (containsDirectory(directory, privateDirectory) || containsDirectory(privateDirectory, directory)) {
+      throw new Error(`Memory directory must not overlap the plugin state directory: ${privateRoot}`)
+    }
+    if (!this.readOnly) mkdirSync(this.memoryDir, { recursive: true })
+    this.usesDefaultMemoryDirectory = directory === realDirectory(defaultMemoryDir)
     const key = createHash("sha256").update(directory).digest("hex")
-    const projectStateDir = join(this.claudeConfigDir, "opencode-memory", projectKey)
-    this.stateDir =
-      resolve(this.memoryDir) === resolve(defaultMemoryDir)
-        ? projectStateDir
-        : join(projectStateDir, "memory-stores", key)
+    const projectStateDir = join(privateRoot, projectKey)
+    this.stateDir = this.usesDefaultMemoryDirectory ? projectStateDir : join(projectStateDir, "memory-stores", key)
     // Recognise the default Claude directory layout too, so an explicit override pointing to
     // another project's default store shares its existing maintenance lock.
     const fromProjects = relative(realDirectory(join(this.claudeConfigDir, "projects")), directory)
     const parts = fromProjects.split(sep)
     this.maintenanceLockPath =
       !isAbsolute(fromProjects) && parts.length === 2 && parts[0] !== ".." && parts[1] === "memory"
-        ? join(this.claudeConfigDir, "opencode-memory", parts[0] ?? "", "maintenance.lock")
-        : join(this.claudeConfigDir, "opencode-memory", "memory-stores", key, "maintenance.lock")
+        ? join(privateRoot, parts[0] ?? "", "maintenance.lock")
+        : join(privateRoot, "memory-stores", key, "maintenance.lock")
   }
 
   scan(): MemoryHeader[] {

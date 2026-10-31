@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { AutoDream } from "../src/extraction/autodream.js"
 import { ExtractionCoordinator } from "../src/extraction/ExtractionCoordinator.js"
@@ -9,6 +9,7 @@ import type { MemoryHost } from "../src/host/types.js"
 import { MemoryStore } from "../src/store/MemoryStore.js"
 import { OwnedSessions } from "../src/util/ownedSessions.js"
 import {
+  canSymlink,
   cleanupTempDirs,
   flush,
   makeConfig,
@@ -97,6 +98,30 @@ test("a custom store does not consume the default project's legacy auto-dream ga
     await extraction.catchUp()
     expect(existsSync(legacy)).toBe(true)
     expect(extraction.state.read().autodream.lastConsolidatedAt).toBe(0)
+  } finally {
+    extraction.dispose()
+    deps.owned.dispose()
+  }
+})
+
+test.skipIf(!canSymlink())("an alias of the default store retains its legacy auto-dream migration", async () => {
+  const root = tempGitRepo()
+  const claude = tempDir()
+  const original = new MemoryStore(root, { claudeConfigDir: claude })
+  const alias = join(tempDir(), "alias")
+  symlinkSync(original.memoryDir, alias, "dir")
+  const config = makeConfig({ autoMemoryDirectory: alias, extract: { catchUpLimit: 0 } }, claude)
+  const store = new MemoryStore(root, config)
+  const legacyDirectory = join(claude, "opencode-memory")
+  mkdirSync(legacyDirectory, { recursive: true })
+  const legacy = join(legacyDirectory, `${posixCksum(root)}.consolidate-lock`)
+  writeFileSync(legacy, "")
+  const deps = makeDeps({ store, config, client: makeSelectorClient().client })
+  const extraction = new ExtractionCoordinator(deps)
+  try {
+    await extraction.catchUp()
+    expect(existsSync(legacy)).toBe(false)
+    expect(new ExtractionStateStore(original.stateDir).read().autodream.lastConsolidatedAt).toBeGreaterThan(0)
   } finally {
     extraction.dispose()
     deps.owned.dispose()

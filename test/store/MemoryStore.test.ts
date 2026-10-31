@@ -1,7 +1,19 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs"
+import { createHash } from "node:crypto"
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import { join } from "node:path"
 import { MaintenanceLock } from "../../src/extraction/lock.js"
+import { ExtractionStateStore } from "../../src/extraction/state.js"
 import { MemoryStore } from "../../src/store/MemoryStore.js"
 import * as paths from "../../src/store/paths.js"
 import { sanitizePath } from "../../src/store/paths.js"
@@ -106,6 +118,84 @@ describe("MemoryStore paths", () => {
     const second = new MemoryStore(tempGitRepo(), makeConfig({ autoMemoryDirectory: alias }, claude))
     expect(second.memoryDir).toContain(alias)
     expect(second.maintenanceLockPath).toBe(first.maintenanceLockPath)
+  })
+
+  test.skipIf(!canSymlink())("a symlink alias of the default store retains its persisted state and lock", () => {
+    const root = tempGitRepo()
+    const claude = tempDir()
+    const original = new MemoryStore(root, { claudeConfigDir: claude })
+    const state = new ExtractionStateStore(original.stateDir)
+    state.update((data) => {
+      data.sessions.ses_existing = { lastExtractedMessageID: "a", updatedAt: Date.now(), failures: 0 }
+      data.autodream.lastConsolidatedAt = 123
+    })
+    const alias = join(tempDir(), "alias")
+    symlinkSync(original.memoryDir, alias, "dir")
+    const override = new MemoryStore(root, makeConfig({ autoMemoryDirectory: alias }, claude))
+    expect(override.stateDir).toBe(original.stateDir)
+    expect(new ExtractionStateStore(override.stateDir).read()).toEqual(state.read())
+    expect(override.maintenanceLockPath).toBe(original.maintenanceLockPath)
+  })
+
+  test.skipIf(!canSymlink())("hashes exact filesystem realpaths without Unicode normalization", () => {
+    const root = tempGitRepo()
+    const claude = tempDir()
+    const parent = tempDir()
+    const stores = ["é", "e\u0301"].map((name, index) => {
+      const directory = join(parent, name)
+      mkdirSync(directory, { recursive: true })
+      const alias = join(tempDir(), `alias-${index}`)
+      symlinkSync(directory, alias, "dir")
+      const store = new MemoryStore(root, makeConfig({ autoMemoryDirectory: alias }, claude))
+      const key = createHash("sha256").update(realpathSync.native(directory)).digest("hex")
+      expect(store.stateDir).toBe(
+        join(claude, "opencode-memory", sanitizePath(store.canonicalRoot), "memory-stores", key),
+      )
+      expect(store.maintenanceLockPath).toBe(join(claude, "opencode-memory", "memory-stores", key, "maintenance.lock"))
+      return store
+    })
+    // Linux permits both spellings as distinct directories; macOS usually aliases them.
+    const [first, second] = stores as [MemoryStore, MemoryStore]
+    if (statSync(first.memoryDir).ino !== statSync(second.memoryDir).ino) {
+      expect(first.stateDir).not.toBe(second.stateDir)
+      expect(first.maintenanceLockPath).not.toBe(second.maintenanceLockPath)
+    }
+  })
+
+  test.each([false, true])(
+    "rejects memory roots overlapping private state before writing (readOnly: %s)",
+    (readOnly) => {
+      const root = tempGitRepo()
+      const claude = join(tempDir(), "claude")
+      const privateRoot = join(claude, "opencode-memory")
+      for (const autoMemoryDirectory of [claude, privateRoot, join(privateRoot, "nested")]) {
+        expect(() => new MemoryStore(root, { claudeConfigDir: claude, autoMemoryDirectory, readOnly })).toThrow(
+          /overlap.*plugin state/i,
+        )
+        expect(existsSync(claude)).toBe(false)
+      }
+      // A sibling with the same string prefix is safe.
+      const store = new MemoryStore(root, {
+        claudeConfigDir: claude,
+        autoMemoryDirectory: `${privateRoot}-notes`,
+        readOnly,
+      })
+      expect(store.memoryDir).toContain(`${privateRoot}-notes`)
+    },
+  )
+
+  test.skipIf(!canSymlink())("rejects state overlap through aliases even when the state root does not exist", () => {
+    const root = tempGitRepo()
+    const directory = tempDir()
+    const alias = join(tempDir(), "alias")
+    symlinkSync(directory, alias, "dir")
+    for (const [claudeConfigDir, autoMemoryDirectory] of [
+      [alias, directory],
+      [directory, alias],
+    ] as const) {
+      expect(() => new MemoryStore(root, { claudeConfigDir, autoMemoryDirectory })).toThrow(/overlap.*plugin state/i)
+    }
+    expect(existsSync(join(directory, "opencode-memory"))).toBe(false)
   })
 
   test("read-only mode neither creates the custom directory nor writes private state", () => {
