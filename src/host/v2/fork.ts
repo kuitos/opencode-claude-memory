@@ -14,6 +14,17 @@ export const FORK_CLEANUP_TIMEOUT_MS = 15_000
 export const FORK_READ_TIMEOUT_MS = 30_000
 // `wait` can return before an enqueued prompt was admitted; re-check this often until the deadline.
 export const FORK_SETTLE_POLL_MS = 250
+// Durable session annotation so V2 forks stay identifiable without `parentID` (setting `parentID`
+// causes OpenCode 2.x to post a `<subagent>` report into the parent chat and wake its model).
+export const FORK_METADATA_KEY = "opencodeClaudeMemoryFork"
+
+export function isMemoryForkMetadata(metadata: unknown): boolean {
+  return (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    (metadata as Record<string, unknown>)[FORK_METADATA_KEY] === true
+  )
+}
 
 export type PermissionRule = { action: string; resource: string; effect: "allow" | "deny" | "ask" }
 
@@ -37,6 +48,7 @@ export type V2SessionApi = {
     title?: string
     agent?: string
     model?: ModelRef
+    metadata?: Record<string, unknown>
     permissions?: PermissionRule[]
   }): Promise<{ id: string }>
   prompt(input: { sessionID: string; text: string }): Promise<unknown>
@@ -115,10 +127,10 @@ export async function runV2Fork(session: V2SessionApi, input: V2ForkInput): Prom
 
   const created = await deadline(`${input.title} session.create`, createTimeoutMs, () =>
     session.create({
-      ...(input.parentSessionID ? { parentID: input.parentSessionID } : {}),
       title: input.title,
       agent: input.agent,
       ...(input.model ? { model: input.model } : {}),
+      metadata: { [FORK_METADATA_KEY]: true },
       permissions: input.permissions,
     }),
   )

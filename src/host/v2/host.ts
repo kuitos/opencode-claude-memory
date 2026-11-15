@@ -10,7 +10,7 @@
 import type { Logger } from "../../util/log.js"
 import { withDeadline } from "../../util/timeout.js"
 import { buildGeneratePrompt } from "../generate.js"
-import { type GenerateInput, type MemoryHost, SDK_READ_TIMEOUT_MS } from "../types.js"
+import { type ForkCleanupStage, type GenerateInput, type MemoryHost, SDK_READ_TIMEOUT_MS } from "../types.js"
 import { forkSessionRules, PERMISSIONS_PROBE_AGENT } from "./agents.js"
 import { type ModelRef, type PermissionRule, runV2Fork, type V2Message, type V2SessionApi } from "./fork.js"
 import { toTranscript } from "./transcript.js"
@@ -24,6 +24,8 @@ export type V2HostOptions = {
   getAgent: (name: string) => Promise<V2AgentInfo | undefined>
   // The agent's sandbox: the session ruleset of every fork starts with it.
   sandboxFor: (name: string) => PermissionRule[]
+  onForkCreated?: (sessionID: string) => void
+  onForkCleanupFailed?: (sessionID: string, stage: ForkCleanupStage) => void
   log?: Logger
 }
 
@@ -102,11 +104,16 @@ export class V2Host implements MemoryHost {
       ...(agent?.model ? { model: agent.model } : {}),
       onCreated: (id) => {
         if (input.system) this.forkSystems.set(id, input.system)
+        this.options.onForkCreated?.(id)
         input.onCreated?.(id)
       },
       onFinished: (id) => {
         this.forkSystems.delete(id)
         input.onFinished?.(id)
+      },
+      onCleanupFailed: (id, stage, error) => {
+        this.options.onForkCleanupFailed?.(id, stage)
+        input.onCleanupFailed?.(id, stage, error)
       },
     })
   }

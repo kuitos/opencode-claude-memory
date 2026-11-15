@@ -4,10 +4,13 @@ import { join } from "node:path"
 import { MEMORY_AGENTS } from "../../src/config.js"
 import { ExtractionStateStore } from "../../src/extraction/state.js"
 import { BASELINE_PROBE_AGENT } from "../../src/host/v2/agents.js"
+import { MAX_IGNORED_FORKS, V2SessionEvents } from "../../src/host/v2/events.js"
+import { FORK_METADATA_KEY } from "../../src/host/v2/fork.js"
 import { LOG_FILE } from "../../src/host/v2/log.js"
 import { AUTO_MEMORY_MARKER } from "../../src/prompt/systemPrompt.js"
 import { MemoryStore } from "../../src/store/MemoryStore.js"
 import { resolveMemoryRoot } from "../../src/store/paths.js"
+import { OwnedSessions } from "../../src/util/ownedSessions.js"
 import { cleanupTempDirs, seedMemory, tempDir } from "../helpers/index.js"
 import {
   BASELINE_RULES,
@@ -237,7 +240,8 @@ describe("V2 setup: extraction", () => {
     await waitFor(() => state.getSession("ses_a")?.lastExtractedMessageID === conversation[1]?.id)
     const create = mock.calls.find((call) => call.method === "session.create")?.input as Record<string, unknown>
     expect(create.agent).toBe(MEMORY_AGENTS.extract)
-    expect(create.parentID).toBe("ses_a")
+    expect(create).not.toHaveProperty("parentID")
+    expect(create.metadata).toEqual({ [FORK_METADATA_KEY]: true })
     expect(create.permissions).toEqual(mock.agents.get(MEMORY_AGENTS.extract)?.permissions)
     expect(forkPrompts(mock)[0]).toContain("I prefer tabs over spaces in Go code")
     // The task is restated around the transcript in the prompt text itself (#48).
@@ -383,5 +387,251 @@ describe("V2 setup: cleanup", () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(mock.stream.subscribed).toBe(1)
     expect(mock.methods()).not.toContain("session.create")
+  })
+})
+
+describe("V2 setup: fork isolation (#61)", () => {
+  test("auto-dream forks without parentID, preserves sandbox permissions and cleans up", async () => {
+    const mock = makeV2Context({
+      options: {
+        extract: { debounceMs: 0, timeoutMs: 500 },
+        autodream: { enabled: true, minHours: 1, minSessions: 1 },
+      },
+    })
+    mock.conversations.ses_dream_trigger = [v2User("we use bun for tests"), v2Assistant("noted")]
+    const claudeConfigDir = tempDir("ocm-v2-claude-")
+    const state = new ExtractionStateStore(storeFor(mock.directory, claudeConfigDir).stateDir)
+    state.update((data) => {
+      data.autodream.lastConsolidatedAt = Date.now() - 2 * 60 * 60 * 1000
+    })
+
+    const { cleanup } = await setupV2(mock, claudeConfigDir)
+    mock.emit(created("ses_dream_trigger", mock.directory))
+    mock.emit(execution("succeeded", "ses_dream_trigger"))
+    await waitFor(() =>
+      mock.calls.some(
+        (call) => call.method === "session.create" && (call.input as { agent?: string }).agent === MEMORY_AGENTS.dream,
+      ),
+    )
+    await waitFor(() => mock.methods().filter((method) => method === "session.remove").length >= 2)
+
+    const creates = mock.calls
+      .filter((call) => call.method === "session.create")
+      .map((call) => call.input as Record<string, unknown>)
+    const dreamCreate = creates.find((input) => input.agent === MEMORY_AGENTS.dream)
+    expect(dreamCreate).toBeDefined()
+    expect(dreamCreate).not.toHaveProperty("parentID")
+    expect(dreamCreate?.metadata).toEqual({ [FORK_METADATA_KEY]: true })
+    expect(dreamCreate?.permissions).toEqual(mock.agents.get(MEMORY_AGENTS.dream)?.permissions)
+    await cleanup()
+  })
+
+  test("session.created arriving before session.create resolves does not track annotated or unannotated forks", async () => {
+    for (const annotated of [true, false]) {
+      const mock = makeV2Context({ options: FAST })
+      const conversation = [v2User("database is postgres 17"), v2Assistant("ok")]
+      mock.conversations.ses_u = conversation
+      const rawSession = mock.ctx.session as unknown as {
+        create: (body: Record<string, unknown>) => Promise<{ id: string }>
+      }
+      const originalCreate = rawSession.create
+      let createdForkID = ""
+      rawSession.create = async (body) => {
+        const result = await originalCreate(body)
+        createdForkID = result.id
+        // Deliver `session.created` BEFORE `session.create()` resolves to `runV2Fork`.
+        mock.emit({
+          type: "session.created",
+          location: { directory: mock.directory },
+          data: {
+            sessionID: result.id,
+            location: { directory: mock.directory },
+            ...(annotated ? { agent: body.agent, metadata: body.metadata } : {}),
+          },
+        })
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        return result
+      }
+
+      const { cleanup, claudeConfigDir } = await setupV2(mock)
+      const state = new ExtractionStateStore(storeFor(mock.directory, claudeConfigDir).stateDir)
+      mock.emit(created("ses_u", mock.directory))
+      mock.emit(execution("succeeded", "ses_u"))
+      await waitFor(() => state.getSession("ses_u")?.lastExtractedMessageID === conversation[1]?.id)
+      await waitFor(() => mock.methods().includes("session.remove"))
+
+      // Hooks and delayed events on the fork must not treat it as a user session.
+      mock.conversations[createdForkID] = [v2User("fork transcript"), v2Assistant("saved")]
+      await runHook(mock, "prompt", {
+        sessionID: createdForkID,
+        messageID: "msg_fork_p",
+        prompt: { text: "database is postgres 17" },
+      })
+      const forkCtx = { sessionID: createdForkID, system: [] as Array<{ text: string }> }
+      await runHook(mock, "context", forkCtx)
+      mock.emit(execution("succeeded", createdForkID))
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      expect(forkCtx.system).toHaveLength(0)
+      expect(mock.methods()).not.toContain("generate.text")
+      expect(mock.calls.filter((call) => call.method === "session.create")).toHaveLength(1)
+      expect(state.getSession(createdForkID)).toBeUndefined()
+      await cleanup()
+    }
+  })
+
+  test("failed delete retains fork isolation across prompt, context, and delayed execution events", async () => {
+    const mock = makeV2Context({ options: FAST })
+    const conversation = [v2User("our CI uses depot runners"), v2Assistant("noted")]
+    mock.conversations.ses_u = conversation
+    const rawSession = mock.ctx.session as unknown as {
+      remove: (body: { sessionID: string }) => Promise<unknown>
+    }
+    rawSession.remove = async () => {
+      throw new Error("delete failed")
+    }
+
+    const { cleanup, claudeConfigDir } = await setupV2(mock)
+    const store = storeFor(mock.directory, claudeConfigDir)
+    const state = new ExtractionStateStore(store.stateDir)
+
+    mock.emit(created("ses_u", mock.directory))
+    mock.emit(execution("succeeded", "ses_u"))
+    await waitFor(() => state.getSession("ses_u")?.lastExtractedMessageID === conversation[1]?.id)
+    await waitFor(() => readFileSync(join(store.stateDir, LOG_FILE), "utf-8").includes("cleanup failed"))
+
+    const forkID = "ses_fork_1"
+    mock.conversations[forkID] = [v2User("leaked fork turn"), v2Assistant("ok")]
+    await runHook(mock, "prompt", { sessionID: forkID, messageID: "msg_p", prompt: { text: "CI runners" } })
+    const forkCtx = { sessionID: forkID, system: [] as Array<{ text: string }> }
+    await runHook(mock, "context", forkCtx)
+    mock.emit(execution("succeeded", forkID))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+
+    expect(forkCtx.system).toHaveLength(0)
+    expect(mock.methods()).not.toContain("generate.text")
+    expect(mock.calls.filter((call) => call.method === "session.create")).toHaveLength(1)
+    expect(state.getSession(forkID)).toBeUndefined()
+    await cleanup()
+  })
+
+  test("retained failed-delete forks stay isolated after owned grace expires and across >512 normal forks", async () => {
+    const owned = new OwnedSessions()
+    const idles: string[] = []
+    const forgotten: string[] = []
+    const events = new V2SessionEvents({
+      directory: "/repo",
+      owned,
+      recall: { forget: (id) => forgotten.push(id) },
+      extraction: {
+        onSessionIdle: (id) => idles.push(id),
+        onSessionStatus: () => {},
+        onSessionDeleted: () => {},
+      },
+    })
+
+    // Simulate a fork whose delete failed: `owned` expires quickly, while `ignoreFork(id, true)` retains it.
+    owned.add("ses_leaked")
+    events.ignoreFork("ses_leaked", true)
+    owned.release("ses_leaked", 1)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(owned.has("ses_leaked")).toBe(false)
+
+    // Flood `seenForks` with more than MAX_IGNORED_FORKS normal fork creations; `retainedForks` must not be evicted.
+    for (let i = 0; i < MAX_IGNORED_FORKS + 50; i += 1) {
+      events.handle({
+        type: "session.created",
+        location: { directory: "/repo" },
+        data: { sessionID: `ses_normal_${i}`, metadata: { [FORK_METADATA_KEY]: true } },
+      })
+    }
+
+    expect(events.isIgnoredFork("ses_leaked")).toBe(true)
+    events.track("ses_leaked")
+    expect(events.isTracked("ses_leaked")).toBe(false)
+    events.handle({ type: "session.execution.succeeded", data: { sessionID: "ses_leaked" } })
+    expect(idles).toEqual([])
+    expect(forgotten).toContain("ses_leaked")
+    owned.dispose()
+  })
+
+  test("residual pre-restart memory-agent session seen by context hook is isolated without injecting memory", async () => {
+    const mock = makeV2Context({ options: FAST })
+    const { cleanup, claudeConfigDir } = await setupV2(mock)
+    seedMemory(storeFor(mock.directory, claudeConfigDir), {
+      fileName: "secret",
+      name: "Secret",
+      description: "Production deploy note",
+      content: "NEVER-INJECT-INTO-FORK",
+    })
+
+    // Fresh plugin instance has no in-memory `owned` or `ignoredForks` for `ses_residual`.
+    const residualCtx = {
+      sessionID: "ses_residual",
+      agent: MEMORY_AGENTS.extract,
+      system: [] as Array<{ text: string }>,
+    }
+    await runHook(mock, "context", residualCtx)
+    expect(residualCtx.system).toHaveLength(0)
+
+    // Even if `prompt` had run first on a residual session, `context` with the memory agent untracks it before idle extraction.
+    await runHook(mock, "prompt", { sessionID: "ses_residual_2", messageID: "msg_p", prompt: { text: "deploy note" } })
+    const residualCtx2 = {
+      sessionID: "ses_residual_2",
+      agent: MEMORY_AGENTS.dream,
+      system: [] as Array<{ text: string }>,
+    }
+    await runHook(mock, "context", residualCtx2)
+    expect(residualCtx2.system).toHaveLength(0)
+
+    mock.conversations.ses_residual = [v2User("old residual turn"), v2Assistant("ok")]
+    mock.conversations.ses_residual_2 = [v2User("old residual turn 2"), v2Assistant("ok")]
+    mock.emit(execution("succeeded", "ses_residual"))
+    mock.emit(execution("succeeded", "ses_residual_2"))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    expect(mock.methods()).not.toContain("session.create")
+    await cleanup()
+  })
+
+  test("a real user session remains tracked and extracted even with a matching title", async () => {
+    const mock = makeV2Context({
+      options: FAST,
+      generate: () => '{"selected_memories":["deploy.md"]}',
+    })
+    const conversation = [v2User("how does our deploy work?"), v2Assistant("it uses blue-green")]
+    mock.conversations.ses_real = conversation
+    const { cleanup, claudeConfigDir } = await setupV2(mock)
+    seedMemory(storeFor(mock.directory, claudeConfigDir), {
+      fileName: "deploy",
+      name: "Deploy",
+      description: "Deploy workflow",
+      content: "REAL-USER-RECALL-WORKS",
+    })
+    const state = new ExtractionStateStore(storeFor(mock.directory, claudeConfigDir).stateDir)
+
+    mock.emit({
+      type: "session.created",
+      location: { directory: mock.directory },
+      data: {
+        sessionID: "ses_real",
+        title: "opencode-memory extraction",
+        agent: "build",
+        location: { directory: mock.directory },
+      },
+    })
+    await runHook(mock, "prompt", {
+      sessionID: "ses_real",
+      messageID: "msg_real",
+      prompt: { text: "how does deploy work?" },
+    })
+    const userCtx = { sessionID: "ses_real", agent: "build", system: [] as Array<{ text: string }> }
+    await runHook(mock, "context", userCtx)
+    expect(userCtx.system).toHaveLength(1)
+    expect(userCtx.system[0]?.text.startsWith(AUTO_MEMORY_MARKER)).toBe(true)
+    expect(userCtx.system[0]?.text).toContain("REAL-USER-RECALL-WORKS")
+
+    mock.emit(execution("succeeded", "ses_real"))
+    await waitFor(() => state.getSession("ses_real")?.lastExtractedMessageID === conversation[1]?.id)
+    await cleanup()
   })
 })
