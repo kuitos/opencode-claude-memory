@@ -5,12 +5,15 @@
 // created here (`session.created` with this location) or seen by the location-scoped prompt and
 // context hooks. Turn boundaries: `session.execution.started` = busy, `succeeded` / `failed` /
 // `interrupted` = idle. The deprecated `session.status` / `session.idle` events are honoured too.
+import { MEMORY_AGENTS, type MemoryAgents } from "../../config.js"
 import type { ExtractionCoordinator } from "../../extraction/ExtractionCoordinator.js"
 import type { RecalledMemory } from "../../recall/format.js"
 import { type RecallCoordinator, SESSION_STATE_TTL_MS } from "../../recall/RecallCoordinator.js"
 import type { MemoryType } from "../../store/frontmatter.js"
 import { surfaceKey } from "../../store/scan.js"
 import type { OwnedSessions } from "../../util/ownedSessions.js"
+import { isMemoryAgent } from "./agents.js"
+import { isMemoryForkMetadata } from "./fork.js"
 
 export type V2Event = {
   type?: string
@@ -25,11 +28,24 @@ const IDLE_EVENTS: readonly string[] = [
   "session.idle",
 ]
 
+export const MAX_IGNORED_FORKS = 512
+
+function rememberBounded(set: Set<string>, id: string, maxSize = MAX_IGNORED_FORKS): void {
+  if (set.has(id)) set.delete(id)
+  set.add(id)
+  while (set.size > maxSize) {
+    const oldest = set.values().next().value
+    if (oldest === undefined) break
+    set.delete(oldest)
+  }
+}
+
 export type V2EventDeps = {
   directory: string
   owned: OwnedSessions
   recall: Pick<RecallCoordinator, "forget">
   extraction: Pick<ExtractionCoordinator, "onSessionIdle" | "onSessionStatus" | "onSessionDeleted">
+  agents?: MemoryAgents
   now?: () => number
 }
 
@@ -42,14 +58,36 @@ export class V2SessionEvents {
   // model request and does not keep it in the history, so the recalled section is re-injected on
   // every request (not only the first one of a turn) and its keys are what the selector skips.
   private readonly recalled = new Map<string, Map<string, RecalledMemory>>()
+  // Bounded sets of plugin forks that carry no `parentID` on V2: `seenForks` captures forks
+  // announced on `session.created` (including when it races ahead of `session.create()`), while
+  // `retainedForks` keeps forks whose cleanup delete failed or that a context hook observed under
+  // a memory agent so successful forks cannot evict them after the 60 s `owned` grace expires.
+  private readonly seenForks = new Set<string>()
+  private readonly retainedForks = new Set<string>()
   private readonly now: () => number
 
   constructor(private readonly deps: V2EventDeps) {
     this.now = deps.now ?? Date.now
   }
 
+  isIgnoredFork(sessionID: string): boolean {
+    return this.seenForks.has(sessionID) || this.retainedForks.has(sessionID)
+  }
+
+  // Marks a session as a plugin-owned fork and clears any accidental user-session state.
+  ignoreFork(sessionID: string, persistent = false): void {
+    rememberBounded(persistent ? this.retainedForks : this.seenForks, sessionID)
+    this.forget(sessionID)
+  }
+
+  // Drops any user-session tracking recorded before `session.create()` resolved (e.g., from an
+  // unannotated `session.created` race), without permanently retaining normal deleted forks.
+  untrack(sessionID: string): void {
+    this.forget(sessionID)
+  }
+
   track(sessionID: string): void {
-    if (this.deps.owned.has(sessionID)) return
+    if (this.deps.owned.has(sessionID) || this.isIgnoredFork(sessionID)) return
     const now = this.now()
     this.evictStale(now)
     this.sessions.set(sessionID, now)
@@ -94,15 +132,21 @@ export class V2SessionEvents {
 
     if (type === "session.deleted") {
       this.deps.owned.release(sessionID, 5_000)
+      this.seenForks.delete(sessionID)
+      this.retainedForks.delete(sessionID)
       this.forget(sessionID)
       return
     }
     if (type === "session.created") {
+      if (isMemoryForkMetadata(data.metadata) || isMemoryAgent(data.agent, this.deps.agents ?? MEMORY_AGENTS)) {
+        this.ignoreFork(sessionID)
+        return
+      }
       const directory = (data.location as { directory?: unknown } | undefined)?.directory ?? event.location?.directory
       if (directory === this.deps.directory && !data.parentID) this.track(sessionID)
       return
     }
-    if (this.deps.owned.has(sessionID) || !this.sessions.has(sessionID)) return
+    if (this.deps.owned.has(sessionID) || this.isIgnoredFork(sessionID) || !this.sessions.has(sessionID)) return
     this.sessions.set(sessionID, this.now())
 
     if (type === "session.execution.started") {

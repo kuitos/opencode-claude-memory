@@ -1,6 +1,7 @@
 import { describe, expect, setSystemTime, test } from "bun:test"
 import { userRules } from "../../src/host/v2/agents.js"
 import {
+  FORK_METADATA_KEY,
   ForkSessionError,
   ForkSessionTimeoutError,
   forkOutcome,
@@ -91,7 +92,7 @@ describe("runV2Fork", () => {
     expect(calls).toEqual(["create", "prompt", "wait", "interrupt", "remove"])
   })
 
-  test("passes the ruleset, agent and parent to session.create", async () => {
+  test("passes the ruleset, agent and fork metadata to session.create without parentID", async () => {
     const { session } = scripted([[prompt, done]])
     let body: unknown
     const create = session.create
@@ -101,11 +102,12 @@ describe("runV2Fork", () => {
     }
     await runV2Fork(session, { ...base, parentSessionID: "ses_parent" })
     expect(body).toEqual({
-      parentID: "ses_parent",
       title: "fork",
       agent: "opencode-memory-extract",
+      metadata: { [FORK_METADATA_KEY]: true },
       permissions: SANDBOX,
     })
+    expect(body).not.toHaveProperty("parentID")
   })
 })
 

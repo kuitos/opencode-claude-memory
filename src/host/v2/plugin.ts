@@ -16,7 +16,7 @@ import { buildMemoryToolSpecs, type MemoryToolSpec } from "../../tools.js"
 import { getErrorMessage, type Logger } from "../../util/log.js"
 import { OwnedSessions } from "../../util/ownedSessions.js"
 import { withDeadline } from "../../util/timeout.js"
-import { applyMemoryAgents, type PermissionRule, sandboxRules } from "./agents.js"
+import { applyMemoryAgents, isMemoryAgent, type PermissionRule, sandboxRules } from "./agents.js"
 import { consumeEvents, V2SessionEvents } from "./events.js"
 import type { V2SessionApi } from "./fork.js"
 import { V2Host } from "./host.js"
@@ -62,6 +62,7 @@ export const createV2Setup =
     const log: Logger = config.readOnly ? () => {} : createFileLogger(store.stateDir)
     const owned = new OwnedSessions()
     const defaults = memoryAgentDefaults(config.agents, config.readOnly)
+    let events: V2SessionEvents | undefined
     const host = new V2Host({
       session: ctx.session as unknown as V2SessionApi,
       generateText: (input) => ctx.generate.text(input),
@@ -72,12 +73,16 @@ export const createV2Setup =
         return agent?.data
       },
       sandboxFor: (name) => sandboxRules(defaults[name]?.allowedTools ?? []),
+      onForkCreated: (id) => events?.untrack(id),
+      onForkCleanupFailed: (id, stage) => {
+        if (stage === "delete") events?.ignoreFork(id, true)
+      },
       log,
     })
     const deps = { store, config, host, owned, log }
     const recall = new RecallCoordinator(deps)
     const extraction = new ExtractionCoordinator(deps)
-    const events = new V2SessionEvents({ directory, owned, recall, extraction })
+    events = new V2SessionEvents({ directory, owned, recall, extraction, agents: config.agents })
     const registrations: Registration[] = []
     const register = async (what: string, call: () => Promise<Registration>) => {
       registrations.push(await bounded(what, SETUP_CALL_TIMEOUT_MS, call))
@@ -109,7 +114,7 @@ export const createV2Setup =
       await register("session.hook(prompt)", () =>
         ctx.session.hook("prompt", (event) => {
           const { sessionID } = event
-          if (owned.has(sessionID) || host.systemFor(sessionID) !== undefined) return
+          if (owned.has(sessionID) || events.isIgnoredFork(sessionID) || host.systemFor(sessionID) !== undefined) return
           events.track(sessionID)
           const text = (event.prompt as { text?: unknown } | undefined)?.text
           recall.onTurn({
@@ -133,7 +138,11 @@ export const createV2Setup =
             event.system.push({ type: "text", text: forkSystem } as (typeof event.system)[number])
             return
           }
-          if (owned.has(sessionID)) return
+          if (owned.has(sessionID) || events.isIgnoredFork(sessionID)) return
+          if (isMemoryAgent(event.agent, config.agents)) {
+            events.ignoreFork(sessionID, true)
+            return
+          }
           events.track(sessionID)
           // Everything recalled in this session so far, not only this turn's selection: the system
           // prompt is rebuilt for every request, so a memory shown once would otherwise vanish after

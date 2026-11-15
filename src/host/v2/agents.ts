@@ -15,8 +15,12 @@
 // ruleset (evaluated after the agent's) that ends with the sandbox; see forkSessionRules().
 import type { AgentEditor } from "@opencode/plugin/promise/agent"
 import { type MemoryAgentDefaults, memoryAgentDefaults } from "../../agents.js"
-import type { MemoryAgents } from "../../config.js"
+import { MEMORY_AGENTS, type MemoryAgents } from "../../config.js"
 import type { PermissionRule } from "./fork.js"
+
+export function isMemoryAgent(agent: unknown, agents: MemoryAgents = MEMORY_AGENTS): boolean {
+  return typeof agent === "string" && (agent === agents.extract || agent === agents.dream || agent === agents.recall)
+}
 
 export type { PermissionRule }
 
