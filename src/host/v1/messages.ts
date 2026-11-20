@@ -11,6 +11,35 @@ export type TurnInfo = {
   messageIndex?: number
 }
 
+export type V1ModelRef = {
+  providerID: string
+  modelID: string
+}
+
+// Normalises a V1 model reference, accepting either `{ providerID, modelID }` (UserMessage.info.model)
+// or `{ providerID, id }` (the Model object passed to `experimental.chat.system.transform`).
+export function normalizeV1Model(value: unknown): V1ModelRef | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const raw = value as { providerID?: unknown; modelID?: unknown; id?: unknown }
+  const providerID = typeof raw.providerID === "string" ? raw.providerID.trim() : ""
+  const modelID = typeof raw.modelID === "string" ? raw.modelID.trim() : typeof raw.id === "string" ? raw.id.trim() : ""
+  if (!providerID || !modelID) return undefined
+  return { providerID, modelID }
+}
+
+// Extracts the most recently used model from a V1 message list (user or assistant messages).
+export function extractLastV1Model(messages: readonly ChatMessage[]): V1ModelRef | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const info = messages[i]?.info as { model?: unknown; providerID?: unknown; modelID?: unknown } | undefined
+    if (!info || typeof info !== "object") continue
+    const fromModel = normalizeV1Model(info.model)
+    if (fromModel) return fromModel
+    const fromFlat = normalizeV1Model(info)
+    if (fromFlat) return fromFlat
+  }
+  return undefined
+}
+
 // Older runtimes and tests may hand over messages whose `info` lacks the full SDK shape; only the
 // fields actually used are read, defensively.
 export function roleOf(message: ChatMessage): string {

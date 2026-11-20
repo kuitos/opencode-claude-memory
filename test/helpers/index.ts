@@ -127,9 +127,15 @@ function buildDeps(overrides: DepsOverrides) {
     client,
     // The coordinators talk to the V1 host built from the mock client, so the recorded client calls
     // are exactly the SDK traffic the plugin produces.
-    host: (client ? createV1Host({ client, directory, toolsFor: (name) => agents.toolsFor(name) }) : undefined) as
-      | MemoryHost
-      | undefined,
+    host: (client
+      ? createV1Host({
+          client,
+          directory,
+          toolsFor: (name) => agents.toolsFor(name),
+          hasConfiguredModel: (name) => agents.hasConfiguredModel(name),
+          modelMode: config.modelMode,
+        })
+      : undefined) as MemoryHost | undefined,
     directory,
     owned: overrides.owned ?? new OwnedSessions(),
     agents,
@@ -339,9 +345,13 @@ export async function messagesTransform(hooks: Hooks, messages: ChatMessage[]): 
   return output.messages
 }
 
-export async function systemTransform(hooks: Hooks, sessionID: string | undefined): Promise<string> {
+export async function systemTransform(
+  hooks: Hooks,
+  sessionID: string | undefined,
+  model: Record<string, unknown> = {},
+): Promise<string> {
   const output = { system: [] as string[] }
-  await hooks["experimental.chat.system.transform"]?.({ sessionID, model: {} as never }, output)
+  await hooks["experimental.chat.system.transform"]?.({ sessionID, model: model as never }, output)
   return output.system.join("\n\n")
 }
 

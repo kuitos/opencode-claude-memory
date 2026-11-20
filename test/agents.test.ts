@@ -44,6 +44,9 @@ describe("AgentRegistry.register", () => {
     const recall = config.agent?.[MEMORY_AGENTS.recall]
     expect(recall).toMatchObject({ model: "anthropic/claude-haiku-4-5", hidden: true, mode: "all", temperature: 0 })
     expect(recall?.prompt).toBeTruthy()
+    expect(registry.hasConfiguredModel(MEMORY_AGENTS.recall)).toBe(true)
+    expect(registry.hasConfiguredModel(MEMORY_AGENTS.extract)).toBe(false)
+    expect(registry.hasConfiguredModel(MEMORY_AGENTS.dream)).toBe(false)
     expect(config.agent?.[MEMORY_AGENTS.extract]?.hidden).toBe(true)
     expect(config.agent?.[MEMORY_AGENTS.dream]?.hidden).toBe(true)
   })

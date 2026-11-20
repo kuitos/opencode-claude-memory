@@ -7,6 +7,10 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647
 
 const timeoutMs = (fallback: number) => z.number().int().positive().max(MAX_TIMER_DELAY_MS).default(fallback)
 
+export const MODEL_MODES = ["default", "session"] as const
+
+export type ModelMode = (typeof MODEL_MODES)[number]
+
 // Plugin options come from `opencode.json`: `"plugin": [["opencode-claude-memory", { ... }]]`.
 // The schema is strict at every level so a misspelled key fails at plugin load instead of silently
 // falling back to defaults.
@@ -14,6 +18,9 @@ export const MemoryOptionsSchema = z
   .object({
     // Final memory directory, with Claude Code's autoMemoryDirectory path semantics.
     autoMemoryDirectory: z.string().optional(),
+    // Model selection mode: "default" keeps the agent.<name>.model / OpenCode default behaviour;
+    // "session" makes memory agents without an explicit model follow the active session's model.
+    modelMode: z.enum(MODEL_MODES).default("default"),
     extract: z
       .object({
         enabled: z.boolean().default(true),

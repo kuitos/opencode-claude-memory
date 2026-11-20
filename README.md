@@ -87,6 +87,7 @@ All behaviour is configured through OpenCode's own configuration. There are no `
       "extract":   { "enabled": true, "timeoutMs": 120000, "debounceMs": 10000, "maxConversationChars": 60000, "catchUpLimit": 5 },
       "autodream": { "enabled": true, "minHours": 24, "minSessions": 5, "timeoutMs": 300000 },
       "recall":    { "enabled": true, "waitMs": 1500, "timeoutMs": 30000, "maxMemories": 5 },
+      "modelMode": "default",
       "readOnly":  false
     }]
   ],
@@ -101,6 +102,20 @@ All behaviour is configured through OpenCode's own configuration. There are no `
 - Every option above is optional; the values shown are the defaults. Unknown keys are rejected when the plugin loads.
 - When the same plugin is listed in both the global and the project `opencode.json`, OpenCode keeps the **last** declaration (project wins); options are not merged across files.
 - The three agents are registered hidden with a memory-only tool sandbox. On 1.x, override any field (`model`, `steps`, `temperature`, …) under `agent.<name>`; the plugin fills in the rest.
+- `modelMode` controls how the memory agents (`opencode-memory-recall`, `opencode-memory-extract`, `opencode-memory-dream`) choose a model:
+  - `"default"` (default) keeps the existing behaviour: each agent uses the `model` configured under `agent.<name>` (1.x) or `agents.<name>` (2.x), falling back to OpenCode's default model when unset.
+  - `"session"` makes any memory agent **without** an explicit `model` automatically follow the model currently active in the OpenCode session (with reasoning `variant` stripped on 2.x so high-reasoning presets do not stall recall). Any agent with an explicit `agent.<name>.model` / `agents.<name>.model` still keeps its override, so you can mix a dedicated fast recall model with session-following extraction and auto-dream:
+
+```jsonc
+// OpenCode 1.x — follow the active session model without configuring agent.opencode-memory-*
+{ "plugin": [["opencode-claude-memory", { "modelMode": "session" }]] }
+```
+
+```jsonc
+// OpenCode 2.x — follow the active session model without configuring agents.opencode-memory-*
+{ "plugins": [{ "package": "opencode-claude-memory", "options": { "modelMode": "session" } }] }
+```
+
 - `CLAUDE_CONFIG_DIR` is honoured exactly like Claude Code does, and is the only environment variable the plugin reads.
 - `readOnly: true` prevents this plugin from writing to the Claude config directory: no `memory_save` / `memory_delete`, no extraction or auto-dream (whatever `extract` / `autodream` say), no plugin state or log writes, and the memory folder is not created. The index, recall and `memory_list` / `memory_search` / `memory_read` keep working, and the prompt tells the model the memory is read-only.
 - This option does not restrict the host's shell or file-editing tools, or other plugins. To enforce read-only access for the entire host, also configure host permissions or filesystem access controls; the memory prompt alone does not enforce it.
@@ -144,7 +159,7 @@ The same option works in the 1.x plugin options. Configure the same path as `aut
 - The memory directory must not equal, contain or reside inside the plugin's private state root (`<CLAUDE_CONFIG_DIR>/opencode-memory/`), including through symlinks. Such a configuration is rejected before creating directories, so deleted-memory backups cannot be scanned as live memories.
 - `readOnly: true` applies to a custom directory too: it is not created, memory writes are disabled, and no plugin state or logs are written.
 
-**Models for the memory agents.** OpenCode Zen's free models (e.g. `opencode/big-pickle`) reject every request whose tool list lacks OpenCode's `shell` tool (HTTP 403, *"OpenCode's free tier can only be used from within OpenCode"*). The sandboxed extraction and auto-dream forks are exactly such requests on both 1.x and 2.x, and so is recall on 2.x. On a free Zen model, extraction, auto-dream and (on 2.x) recall therefore fail. Configure a paid model for `opencode-memory-extract`, `opencode-memory-dream` and `opencode-memory-recall` (e.g. `opencode/gpt-6-luna`); the main agent can stay on a free model.
+**Models for the memory agents.** OpenCode Zen's free models (e.g. `opencode/big-pickle`) reject every request whose tool list lacks OpenCode's `shell` tool (HTTP 403, *"OpenCode's free tier can only be used from within OpenCode"*). The sandboxed extraction and auto-dream forks are exactly such requests on both 1.x and 2.x, and so is recall on 2.x. On a free Zen model, extraction, auto-dream and (on 2.x) recall therefore fail — including under `modelMode: "session"` when the active session runs on a free Zen model. Keep `modelMode: "default"` (or set explicit models on the memory agents) and configure a paid model for `opencode-memory-extract`, `opencode-memory-dream` and `opencode-memory-recall` (e.g. `opencode/gpt-6-luna`); the main agent can stay on a free model.
 
 **Logs.** On 1.x logs go to the OpenCode service log (`opencode` log directory, service `opencode-claude-memory`). 2.x gives plugins no log API, so the plugin writes `opencode-memory.log` in its state directory instead (rotated at about 1 MB). This is `<CLAUDE_CONFIG_DIR>/opencode-memory/<project>/` by default, or the custom-store state namespace described above.
 

@@ -15,5 +15,12 @@ export const MemorySetup: (context: V2Context) => Promise<V2Cleanup> = createV2S
 const plugin: PluginModule & { setup: typeof MemorySetup } = { id: PLUGIN_ID, server: MemoryPlugin, setup: MemorySetup }
 export default plugin
 
-export { MEMORY_AGENTS, type MemoryConfig, type MemoryOptions, MemoryOptionsSchema } from "./config.js"
+export {
+  MEMORY_AGENTS,
+  type MemoryConfig,
+  type MemoryOptions,
+  MemoryOptionsSchema,
+  MODEL_MODES,
+  type ModelMode,
+} from "./config.js"
 export { MemoryStore } from "./store/MemoryStore.js"

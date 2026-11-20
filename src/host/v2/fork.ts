@@ -30,6 +30,18 @@ export type PermissionRule = { action: string; resource: string; effect: "allow"
 
 export type ModelRef = { id: string; providerID: string; variant?: string }
 
+// Validates and normalises an inherited session model ref, dropping any reasoning `variant` so a
+// main session's high-reasoning preset does not stall recall or inflate background fork latency
+// (and keeping V2 consistent with V1, whose prompt body carries `{ providerID, modelID }` only).
+export function normalizeModelRef(value: unknown): ModelRef | undefined {
+  if (!value || typeof value !== "object") return undefined
+  const ref = value as { id?: unknown; providerID?: unknown }
+  const id = typeof ref.id === "string" ? ref.id.trim() : ""
+  const providerID = typeof ref.providerID === "string" ? ref.providerID.trim() : ""
+  if (!id || !providerID) return undefined
+  return { id, providerID }
+}
+
 // The subset of V2 messages the fork reads back (SessionMessageInfo union).
 export type V2Message = {
   id: string
@@ -39,10 +51,23 @@ export type V2Message = {
   finish?: string
   error?: unknown
   content?: unknown
+  model?: ModelRef
+}
+
+// Extracts the latest model recorded in V2 session context messages (`assistant` or `model-switched`).
+export function extractLastV2Model(messages: readonly V2Message[]): ModelRef | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (!message || (message.type !== "assistant" && message.type !== "model-switched")) continue
+    const model = normalizeModelRef(message.model)
+    if (model) return model
+  }
+  return undefined
 }
 
 // The subset of `ctx.session` the adapter uses. Real calls return richer objects.
 export type V2SessionApi = {
+  get?(input: { sessionID: string }): Promise<{ model?: ModelRef; agent?: string } | undefined>
   create(input: {
     parentID?: string
     title?: string

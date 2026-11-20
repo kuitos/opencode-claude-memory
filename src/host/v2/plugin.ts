@@ -18,7 +18,7 @@ import { OwnedSessions } from "../../util/ownedSessions.js"
 import { withDeadline } from "../../util/timeout.js"
 import { applyMemoryAgents, isMemoryAgent, type PermissionRule, sandboxRules } from "./agents.js"
 import { consumeEvents, V2SessionEvents } from "./events.js"
-import type { V2SessionApi } from "./fork.js"
+import { normalizeModelRef, type V2SessionApi } from "./fork.js"
 import { V2Host } from "./host.js"
 import { createFileLogger } from "./log.js"
 
@@ -73,6 +73,8 @@ export const createV2Setup =
         return agent?.data
       },
       sandboxFor: (name) => sandboxRules(defaults[name]?.allowedTools ?? []),
+      modelMode: config.modelMode,
+      agents: config.agents,
       onForkCreated: (id) => events?.untrack(id),
       onForkCleanupFailed: (id, stage) => {
         if (stage === "delete") events?.ignoreFork(id, true)
@@ -82,7 +84,15 @@ export const createV2Setup =
     const deps = { store, config, host, owned, log }
     const recall = new RecallCoordinator(deps)
     const extraction = new ExtractionCoordinator(deps)
-    events = new V2SessionEvents({ directory, owned, recall, extraction, agents: config.agents })
+    events = new V2SessionEvents({
+      directory,
+      owned,
+      recall,
+      extraction,
+      agents: config.agents,
+      onSessionModel: (sessionID, model) => host.recordSessionModel(sessionID, model),
+      onSessionForgotten: (sessionID) => host.forgetSessionModel(sessionID),
+    })
     const registrations: Registration[] = []
     const register = async (what: string, call: () => Promise<Registration>) => {
       registrations.push(await bounded(what, SETUP_CALL_TIMEOUT_MS, call))
@@ -144,6 +154,10 @@ export const createV2Setup =
             return
           }
           events.track(sessionID)
+          if (config.modelMode === "session") {
+            const model = normalizeModelRef(event.model)
+            if (model) host.recordSessionModel(sessionID, model)
+          }
           // Everything recalled in this session so far, not only this turn's selection: the system
           // prompt is rebuilt for every request, so a memory shown once would otherwise vanish after
           // the first tool call while the selector keeps skipping it as already surfaced.

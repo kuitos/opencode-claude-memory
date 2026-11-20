@@ -1,9 +1,12 @@
 // MemoryHost over the V1 SDK client (`server` plugin entry). Every call keeps the exact SDK traffic
 // the coordinators used to make directly: deadlines, `directory` query and the tool sandbox.
+import type { ModelMode } from "../../config.js"
 import { withDeadline } from "../../util/timeout.js"
 import { buildGeneratePrompt } from "../generate.js"
+import { SessionModelCache } from "../sessionModels.js"
 import { type MemoryHost, SDK_READ_TIMEOUT_MS, type SessionSummary, type TranscriptMessage } from "../types.js"
 import { ForkSessionError, runForkSession } from "./fork.js"
+import { extractLastV1Model, type V1ModelRef } from "./messages.js"
 import { type ChatMessage, type OpencodeClient, type SessionInfo, unwrapData } from "./sdk.js"
 
 export type V1HostOptions = {
@@ -11,6 +14,10 @@ export type V1HostOptions = {
   directory: string
   // The effective tool sandbox of an agent after the user's overrides (AgentRegistry.toolsFor).
   toolsFor?: (agent: string) => Record<string, boolean> | undefined
+  // Whether the user explicitly configured a model for this agent (`agent.<name>.model`).
+  hasConfiguredModel?: (agent: string) => boolean
+  modelMode?: ModelMode
+  sessionModels?: SessionModelCache<V1ModelRef>
 }
 
 // Structured output when the server produced it, otherwise the text parts of the answer.
@@ -38,13 +45,31 @@ function isStructuredOutputError(error: unknown): boolean {
   return error instanceof ForkSessionError && error.message.includes("StructuredOutputError")
 }
 
-export function createV1Host({ client, directory, toolsFor }: V1HostOptions): MemoryHost {
+export function createV1Host({
+  client,
+  directory,
+  toolsFor,
+  hasConfiguredModel,
+  modelMode = "default",
+  sessionModels,
+}: V1HostOptions): MemoryHost {
+  const models = sessionModels ?? new SessionModelCache<V1ModelRef>()
+  const sessionModelFor = (agent: string, parentSessionID: string | undefined): V1ModelRef | undefined => {
+    if (modelMode !== "session" || hasConfiguredModel?.(agent)) return undefined
+    return models.get(parentSessionID)
+  }
+
   return {
     async readTranscript(sessionID) {
       const response = await withDeadline("session.messages", SDK_READ_TIMEOUT_MS, (signal) =>
         client.session.messages({ path: { id: sessionID }, query: { directory }, signal }),
       )
-      const messages: TranscriptMessage[] = unwrapData<ChatMessage[]>(response) ?? []
+      const raw = unwrapData<ChatMessage[]>(response) ?? []
+      if (modelMode === "session") {
+        const lastModel = extractLastV1Model(raw)
+        if (lastModel) models.set(sessionID, lastModel)
+      }
+      const messages: TranscriptMessage[] = raw
       // V1 returns the full session history, so the watermark message is never cut off.
       return { messages, truncated: false }
     },
@@ -74,6 +99,7 @@ export function createV1Host({ client, directory, toolsFor }: V1HostOptions): Me
         agent: input.agent,
         system: input.system,
         tools: toolsFor?.(input.agent),
+        model: sessionModelFor(input.agent, input.parentSessionID),
         parts: [{ type: "text", text: input.text }],
         timeoutMs: input.timeoutMs,
         onCreated: input.onCreated,
@@ -83,6 +109,7 @@ export function createV1Host({ client, directory, toolsFor }: V1HostOptions): Me
     },
 
     async generate(input) {
+      const model = sessionModelFor(input.agent, input.parentSessionID)
       const run = (structured: boolean) =>
         runForkSession({
           client,
@@ -92,6 +119,7 @@ export function createV1Host({ client, directory, toolsFor }: V1HostOptions): Me
           agent: input.agent,
           system: input.system,
           tools: toolsFor?.(input.agent) ?? { "*": false },
+          model,
           ...(structured && input.schema ? { format: { type: "json_schema", schema: input.schema } } : {}),
           parts: [
             {

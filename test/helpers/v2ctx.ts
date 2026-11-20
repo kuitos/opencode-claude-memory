@@ -36,6 +36,8 @@ export function defaultAgent(id: string): MockAgent {
   }
 }
 
+export type MockModelRef = { id: string; providerID: string; variant?: string }
+
 export type MockMessage = {
   id: string
   type: string
@@ -44,6 +46,7 @@ export type MockMessage = {
   content?: unknown[]
   finish?: string
   error?: unknown
+  model?: MockModelRef
 }
 
 export type V2Call = { method: string; input?: unknown }
@@ -121,6 +124,10 @@ export function makeV2Context(
     agents?: MockAgent[]
     // Transcript of user sessions returned by `session.context`.
     conversations?: Record<string, MockMessage[]>
+    // Active model of user sessions returned by `session.get`.
+    sessionModels?: Record<string, MockModelRef | undefined>
+    // Active primary agent of user sessions returned by `session.get`.
+    sessionAgents?: Record<string, string | undefined>
     fork?: ForkBehaviour
     generate?: (prompt: string) => string | Promise<string>
     // opencode.json, applied the way 2.0.22's config-agent transform does after plugin transforms.
@@ -130,6 +137,8 @@ export function makeV2Context(
   const directory = input.directory ?? tempGitRepo("ocm-v2-repo-")
   const calls: V2Call[] = []
   const conversations: Record<string, MockMessage[]> = input.conversations ?? {}
+  const sessionModels: Record<string, MockModelRef | undefined> = input.sessionModels ?? {}
+  const sessionAgents: Record<string, string | undefined> = input.sessionAgents ?? {}
   const agents = new Map<string, MockAgent>((input.agents ?? []).map((agent) => [agent.id, agent]))
   const tools: Array<Record<string, unknown> & { name: string }> = []
   const hooks: Record<string, Hook> = {}
@@ -198,6 +207,16 @@ export function makeV2Context(
         calls.push({ method: `session.hook:${name}` })
         hooks[name] = callback
         return registration(`session.hook:${name}`)
+      },
+      get: async (body: { sessionID: string }) => {
+        calls.push({ method: "session.get", input: body })
+        const model = sessionModels[body.sessionID]
+        const agent = sessionAgents[body.sessionID]
+        return {
+          id: body.sessionID,
+          ...(model ? { model } : {}),
+          ...(agent ? { agent } : {}),
+        }
       },
       create: async (body: Record<string, unknown>) => {
         calls.push({ method: "session.create", input: body })
@@ -276,6 +295,8 @@ export function makeV2Context(
     tools,
     hooks,
     conversations,
+    sessionModels,
+    sessionAgents,
     disposed,
     stream,
     emit(event: unknown) {

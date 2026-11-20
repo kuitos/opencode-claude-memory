@@ -21,6 +21,7 @@ describe("parseConfig", () => {
     })
     expect(config.autodream).toEqual({ enabled: true, minHours: 24, minSessions: 5, timeoutMs: 300_000 })
     expect(config.recall).toEqual({ enabled: true, waitMs: 1_500, timeoutMs: 30_000, maxMemories: 5 })
+    expect(config.modelMode).toBe("default")
     expect(config.agents).toBe(MEMORY_AGENTS)
     expect(config.claudeConfigDir).toBe(join(homedir(), ".claude"))
   })
@@ -78,5 +79,13 @@ describe("parseConfig", () => {
     expect(config.autoMemoryDirectory).toBe(`${join(home, "memory")}${sep}`)
     expect(parseConfig({ autoMemoryDirectory: "relative" }, {}, home).autoMemoryDirectory).toBeUndefined()
     expect(() => parseConfig({ autoMemoryDirectory: 123 }, {}, home)).toThrow(/autoMemoryDirectory/)
+  })
+
+  test("validates modelMode and defaults to default", () => {
+    expect(parseConfig({}, {}).modelMode).toBe("default")
+    expect(parseConfig({ modelMode: "default" }, {}).modelMode).toBe("default")
+    expect(parseConfig({ modelMode: "session" }, {}).modelMode).toBe("session")
+    expect(() => parseConfig({ modelMode: "manual" }, {})).toThrow(/modelMode/)
+    expect(() => parseConfig({ modelMode: "manual" }, {})).toThrow(MemoryConfigError)
   })
 })

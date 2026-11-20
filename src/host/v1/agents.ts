@@ -53,4 +53,9 @@ export class AgentRegistry {
   toolsFor(name: string): Record<string, boolean> | undefined {
     return this.merged[name]?.tools
   }
+
+  hasConfiguredModel(name: string): boolean {
+    const model = this.merged[name]?.model
+    return typeof model === "string" && model.trim().length > 0
+  }
 }

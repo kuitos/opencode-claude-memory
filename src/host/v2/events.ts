@@ -13,7 +13,7 @@ import type { MemoryType } from "../../store/frontmatter.js"
 import { surfaceKey } from "../../store/scan.js"
 import type { OwnedSessions } from "../../util/ownedSessions.js"
 import { isMemoryAgent } from "./agents.js"
-import { isMemoryForkMetadata } from "./fork.js"
+import { isMemoryForkMetadata, type ModelRef, normalizeModelRef } from "./fork.js"
 
 export type V2Event = {
   type?: string
@@ -46,6 +46,8 @@ export type V2EventDeps = {
   recall: Pick<RecallCoordinator, "forget">
   extraction: Pick<ExtractionCoordinator, "onSessionIdle" | "onSessionStatus" | "onSessionDeleted">
   agents?: MemoryAgents
+  onSessionModel?: (sessionID: string, model: ModelRef) => void
+  onSessionForgotten?: (sessionID: string) => void
   now?: () => number
 }
 
@@ -120,6 +122,7 @@ export class V2SessionEvents {
       if (seenAt >= cutoff) continue
       this.sessions.delete(id)
       this.recalled.delete(id)
+      this.deps.onSessionForgotten?.(id)
     }
   }
 
@@ -143,10 +146,22 @@ export class V2SessionEvents {
         return
       }
       const directory = (data.location as { directory?: unknown } | undefined)?.directory ?? event.location?.directory
-      if (directory === this.deps.directory && !data.parentID) this.track(sessionID)
+      if (directory === this.deps.directory && !data.parentID) {
+        this.track(sessionID)
+        const model = normalizeModelRef(data.model)
+        if (model) this.deps.onSessionModel?.(sessionID, model)
+      }
       return
     }
-    if (this.deps.owned.has(sessionID) || this.isIgnoredFork(sessionID) || !this.sessions.has(sessionID)) return
+    if (this.deps.owned.has(sessionID) || this.isIgnoredFork(sessionID)) return
+    if (type === "session.model.selected") {
+      if (this.sessions.has(sessionID) || event.location?.directory === this.deps.directory) {
+        const model = normalizeModelRef(data.model)
+        if (model) this.deps.onSessionModel?.(sessionID, model)
+      }
+      return
+    }
+    if (!this.sessions.has(sessionID)) return
     this.sessions.set(sessionID, this.now())
 
     if (type === "session.execution.started") {
@@ -163,6 +178,7 @@ export class V2SessionEvents {
   private forget(sessionID: string): void {
     this.sessions.delete(sessionID)
     this.recalled.delete(sessionID)
+    this.deps.onSessionForgotten?.(sessionID)
     this.deps.recall.forget(sessionID)
     this.deps.extraction.onSessionDeleted(sessionID)
   }
