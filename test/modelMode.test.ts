@@ -5,9 +5,11 @@ import { SessionModelCache } from "../src/host/sessionModels.js"
 import { createV1Host } from "../src/host/v1/host.js"
 import { extractLastV1Model, normalizeV1Model, type V1ModelRef } from "../src/host/v1/messages.js"
 import type { PluginConfig } from "../src/host/v1/sdk.js"
+import { V2SessionEvents } from "../src/host/v2/events.js"
 import { extractLastV2Model, normalizeModelRef } from "../src/host/v2/fork.js"
 import { MemoryStore } from "../src/store/MemoryStore.js"
 import { resolveMemoryRoot } from "../src/store/paths.js"
+import { OwnedSessions } from "../src/util/ownedSessions.js"
 import {
   type ClientCall,
   cleanupTempDirs,
@@ -154,6 +156,32 @@ describe("SessionModelCache and model helpers", () => {
     ]
     expect(extractLastV2Model(msgs)).toEqual({ providerID: "openai", id: "gpt-5" })
     expect(extractLastV2Model([v2User("only user")])).toBeUndefined()
+  })
+})
+
+describe("V2 session events", () => {
+  test("session.model.selected refreshes a tracked session's TTL", () => {
+    let now = 1_000_000
+    const forgotten: string[] = []
+    const events = new V2SessionEvents({
+      directory: "/repo",
+      owned: new OwnedSessions(),
+      recall: { forget: () => {} },
+      extraction: { onSessionIdle: () => {}, onSessionStatus: () => {}, onSessionDeleted: () => {} },
+      onSessionModel: () => {},
+      onSessionForgotten: (sessionID) => void forgotten.push(sessionID),
+      now: () => now,
+    })
+    events.track("ses_ttl")
+    now += 2 * 60 * 60 * 1000
+    events.handle({
+      type: "session.model.selected",
+      data: { sessionID: "ses_ttl", model: { providerID: "openai", id: "gpt-5" } },
+    })
+    // The next track() runs evictStale: the switch must have kept the session fresh.
+    events.track("ses_other")
+    expect(forgotten).toEqual([])
+    expect(events.isTracked("ses_ttl")).toBe(true)
   })
 })
 
@@ -514,6 +542,43 @@ describe("modelMode: V2 setup", () => {
     // User-configured permission rules on the extract agent stay intact.
     expect(extractCreate?.permissions).toContainEqual({ action: "websearch", resource: "*", effect: "allow" })
     expect(dreamCreate?.model).toEqual({ providerID: "google", id: "gemini-2.5-pro" })
+    await cleanup()
+  })
+
+  test("session mode follows a model switch delivered only by session.model.selected", async () => {
+    const modelA = { providerID: "openai", id: "gpt-5" }
+    const modelB = { providerID: "google", id: "gemini-2.5-pro", variant: "max" }
+    const mock = makeV2Context({
+      options: { ...FAST, modelMode: "session" },
+      sessionModels: { ses_switch: modelA },
+      generate: () => '{"selected_memories":[]}',
+    })
+    const events = trackProcessedEvents(mock)
+    const { cleanup, claudeConfigDir } = await setupV2(mock)
+    seedMemory(storeFor(mock.directory, claudeConfigDir), {
+      fileName: "deploy",
+      description: "Deploy process",
+      content: "Blue-green",
+    })
+
+    // Turn 1 resolves modelA from `session.get`.
+    await runHook(mock, "prompt", { sessionID: "ses_switch", messageID: "m1", prompt: { text: "how do we deploy?" } })
+    await runHook(mock, "context", { sessionID: "ses_switch", agent: "build", model: modelA, system: [] })
+
+    // The switch is reported only by the event: `session.get` no longer returns a model afterwards,
+    // so the next turn's recall can only use the model recorded by the event path.
+    delete mock.sessionModels.ses_switch
+    mock.emit({ type: "session.model.selected", data: { sessionID: "ses_switch", model: modelB } })
+    await events.waitForCount(1)
+
+    await runHook(mock, "prompt", { sessionID: "ses_switch", messageID: "m2", prompt: { text: "how do we deploy?" } })
+    // No `model` here: the context hook must not mask a broken event path.
+    await runHook(mock, "context", { sessionID: "ses_switch", agent: "build", system: [] })
+
+    const recalls = mock.calls
+      .filter((call) => call.method === "generate.text")
+      .map((call) => (call.input as { model?: unknown }).model)
+    expect(recalls).toEqual([modelA, { providerID: "google", id: "gemini-2.5-pro" }])
     await cleanup()
   })
 

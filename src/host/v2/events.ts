@@ -157,6 +157,9 @@ export class V2SessionEvents {
     }
     if (this.deps.owned.has(sessionID) || this.isIgnoredFork(sessionID)) return
     if (type === "session.model.selected") {
+      // A model switch is session activity: keep a tracked session's TTL fresh exactly like every
+      // other known event did before this branch returned early (independent of `modelMode`).
+      if (this.sessions.has(sessionID)) this.sessions.set(sessionID, this.now())
       if (
         this.deps.onSessionModel &&
         (this.sessions.has(sessionID) || event.location?.directory === this.deps.directory)
