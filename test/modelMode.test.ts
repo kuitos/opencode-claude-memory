@@ -2,7 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { MEMORY_AGENTS } from "../src/config.js"
 import { ExtractionStateStore } from "../src/extraction/state.js"
 import { SessionModelCache } from "../src/host/sessionModels.js"
-import { extractLastV1Model, normalizeV1Model } from "../src/host/v1/messages.js"
+import { createV1Host } from "../src/host/v1/host.js"
+import { extractLastV1Model, normalizeV1Model, type V1ModelRef } from "../src/host/v1/messages.js"
 import type { PluginConfig } from "../src/host/v1/sdk.js"
 import { extractLastV2Model, normalizeModelRef } from "../src/host/v2/fork.js"
 import { MemoryStore } from "../src/store/MemoryStore.js"
@@ -60,6 +61,38 @@ describe("SessionModelCache and model helpers", () => {
     cache.delete("ses_1")
     expect(cache.get("ses_1")).toBeUndefined()
     expect(cache.get(undefined)).toBeUndefined()
+
+    // Reads refresh an entry too: the untouched ses_b is evicted before the touched ses_a.
+    const touched = new SessionModelCache<string>(2)
+    touched.set("ses_a", "model-a")
+    touched.set("ses_b", "model-b")
+    expect(touched.get("ses_a")).toBe("model-a")
+    touched.set("ses_c", "model-c")
+    expect(touched.get("ses_b")).toBeUndefined()
+    expect(touched.get("ses_a")).toBe("model-a")
+  })
+
+  test("V1 readTranscript backfills a session model only when none was captured yet", async () => {
+    const models = new SessionModelCache<V1ModelRef>()
+    const transcript = [
+      message("assistant", [textPart("ok")], { sessionID: "ses_t", providerID: "openai", modelID: "gpt-5" }),
+    ]
+    const host = createV1Host({
+      client: { session: { messages: async () => ({ data: transcript }) } } as never,
+      directory: "/tmp/ocm-model-mode",
+      modelMode: "session",
+      sessionModels: models,
+    })
+    const fresher: V1ModelRef = { providerID: "anthropic", modelID: "claude-sonnet-4-5" }
+    models.set("ses_t", fresher)
+
+    // The transcript still ends with the previous turn's model; it must not overwrite the hook value.
+    await host.readTranscript("ses_t")
+    expect(models.get("ses_t")).toEqual(fresher)
+
+    // A session no hook has seen yet is backfilled from its transcript.
+    await host.readTranscript("ses_new")
+    expect(models.get("ses_new")).toEqual({ providerID: "openai", modelID: "gpt-5" })
   })
 
   test("normalizeV1Model and extractLastV1Model read both user and assistant shapes", () => {

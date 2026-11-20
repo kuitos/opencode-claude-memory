@@ -65,7 +65,9 @@ export function createV1Host({
         client.session.messages({ path: { id: sessionID }, query: { directory }, signal }),
       )
       const raw = unwrapData<ChatMessage[]>(response) ?? []
-      if (modelMode === "session") {
+      if (modelMode === "session" && !models.get(sessionID)) {
+        // Only backfill an unknown session: a model captured by chat.message / system.transform is
+        // fresher than the transcript, which can still end with the previous turn's assistant reply.
         const lastModel = extractLastV1Model(raw)
         if (lastModel) models.set(sessionID, lastModel)
       }

@@ -8,8 +8,12 @@ export class SessionModelCache<T> {
   constructor(private readonly maxSize = MAX_TRACKED_SESSION_MODELS) {}
 
   get(sessionID: string | undefined): T | undefined {
-    if (!sessionID) return undefined
-    return this.entries.get(sessionID)
+    if (!sessionID || !this.entries.has(sessionID)) return undefined
+    // A read refreshes the entry, so eviction is least-recently-used rather than insertion order.
+    const value = this.entries.get(sessionID) as T
+    this.entries.delete(sessionID)
+    this.entries.set(sessionID, value)
+    return value
   }
 
   set(sessionID: string, model: T): void {
