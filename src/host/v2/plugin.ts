@@ -90,8 +90,12 @@ export const createV2Setup =
       recall,
       extraction,
       agents: config.agents,
-      onSessionModel: (sessionID, model) => host.recordSessionModel(sessionID, model),
-      onSessionForgotten: (sessionID) => host.forgetSessionModel(sessionID),
+      ...(config.modelMode === "session"
+        ? {
+            onSessionModel: (sessionID, model) => host.recordSessionModel(sessionID, model),
+            onSessionForgotten: (sessionID) => host.forgetSessionModel(sessionID),
+          }
+        : {}),
     })
     const registrations: Registration[] = []
     const register = async (what: string, call: () => Promise<Registration>) => {

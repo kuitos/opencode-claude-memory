@@ -45,6 +45,22 @@ function storeFor(directory: string, claudeConfigDir: string): MemoryStore {
   return new MemoryStore(resolveMemoryRoot(directory, directory), { claudeConfigDir })
 }
 
+// Wraps `ctx.event.subscribe` so tests can await event delivery deterministically instead of sleeping.
+function trackProcessedEvents(mock: ReturnType<typeof makeV2Context>) {
+  const subscribe = mock.ctx.event.subscribe.bind(mock.ctx.event)
+  let processed = 0
+  mock.ctx.event.subscribe = async function* (options) {
+    for await (const event of subscribe(options)) {
+      yield event
+      // The consumer handles the yielded event before pulling the next one.
+      processed += 1
+    }
+  }
+  return {
+    waitForCount: (count: number) => waitFor(() => processed >= count),
+  }
+}
+
 describe("SessionModelCache and model helpers", () => {
   test("SessionModelCache bounds entries in LRU order and supports deletion", () => {
     const cache = new SessionModelCache<string>(2)
@@ -110,9 +126,12 @@ describe("SessionModelCache and model helpers", () => {
     const msgs = [
       userMessage("first", "ses_1", { model: { providerID: "anthropic", modelID: "claude-sonnet-4-5" } }),
       message("assistant", [textPart("ok")], { providerID: "openai", modelID: "gpt-5" }),
+      // A failed assistant message with `providerID` and message `id` but no `modelID` must not leak its message ID.
+      message("assistant", [], { id: "msg_failed", providerID: "openai" }),
       userMessage("missing model", "ses_1"),
     ]
     expect(extractLastV1Model(msgs)).toEqual({ providerID: "openai", modelID: "gpt-5" })
+    expect(extractLastV1Model([message("assistant", [], { id: "msg_only", providerID: "openai" })])).toBeUndefined()
     expect(extractLastV1Model([userMessage("no model", "ses_1")])).toBeUndefined()
   })
 
@@ -179,7 +198,7 @@ describe("modelMode: V1 plugin", () => {
       ])
       await systemTransform(hooks, "ses_m", { providerID: userModel.providerID, id: userModel.modelID })
       await emit(hooks, { type: "session.idle", properties: { sessionID: "ses_m" } })
-      await new Promise((resolve) => setTimeout(resolve, 30))
+      await waitFor(() => promptBodies(calls).length >= 2)
 
       const prompts = promptBodies(calls)
       expect(prompts.length).toBeGreaterThanOrEqual(2)
@@ -519,6 +538,9 @@ describe("modelMode: V2 setup", () => {
 
     await runHook(mock, "prompt", { sessionID: "ses_mix", messageID: "m1", prompt: { text: "how do we deploy?" } })
     await runHook(mock, "context", { sessionID: "ses_mix", agent: "build", model: sessionModel, system: [] })
+    // Recall has an explicit agent model, so it must not issue a redundant `session.get`.
+    expect(mock.calls.filter((call) => call.method === "session.get")).toHaveLength(0)
+
     mock.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_mix" } })
     await waitFor(() => mock.methods().includes("session.remove"))
 
@@ -526,6 +548,35 @@ describe("modelMode: V2 setup", () => {
     const createCall = mock.calls.find((call) => call.method === "session.create")?.input as { model?: unknown }
     expect(generateCall.model).toEqual({ providerID: "anthropic", id: "claude-haiku-4-5" })
     expect(createCall.model).toEqual({ providerID: "openai", id: "gpt-5" })
+    // Only the unconfigured extract fork calls `session.get`.
+    expect(mock.calls.filter((call) => call.method === "session.get")).toHaveLength(1)
+    await cleanup()
+  })
+
+  test("session mode skips session.get during extraction when extract agent already has an explicit model", async () => {
+    const extractAgent = defaultAgent(MEMORY_AGENTS.extract)
+    extractAgent.model = { providerID: "opencode", id: "gpt-6-luna" }
+    const mock = makeV2Context({
+      options: { ...FAST, modelMode: "session" },
+      agents: [extractAgent],
+      sessionModels: { ses_pin: { providerID: "openai", id: "gpt-5" } },
+    })
+    mock.conversations.ses_pin = [v2User("Remember we run Postgres 17 in staging"), v2Assistant("noted")]
+    const events = trackProcessedEvents(mock)
+    const { cleanup } = await setupV2(mock)
+
+    mock.emit({
+      type: "session.created",
+      location: { directory: mock.directory },
+      data: { sessionID: "ses_pin", location: { directory: mock.directory } },
+    })
+    await events.waitForCount(1)
+    mock.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_pin" } })
+    await waitFor(() => mock.methods().includes("session.remove"))
+
+    const createCall = mock.calls.find((call) => call.method === "session.create")?.input as { model?: unknown }
+    expect(createCall.model).toEqual({ providerID: "opencode", id: "gpt-6-luna" })
+    expect(mock.calls.filter((call) => call.method === "session.get")).toHaveLength(0)
     await cleanup()
   })
 
@@ -601,6 +652,7 @@ describe("modelMode: V2 setup", () => {
       options: { ...FAST, modelMode: "session" },
       generate: () => '{"selected_memories":[]}',
     })
+    const events = trackProcessedEvents(mock)
     const { cleanup, claudeConfigDir } = await setupV2(mock)
     seedMemory(storeFor(mock.directory, claudeConfigDir), {
       fileName: "deploy",
@@ -614,7 +666,7 @@ describe("modelMode: V2 setup", () => {
       location: { directory: "/somewhere/else" },
       data: { sessionID: "ses_fallback", model: { providerID: "evil", id: "wrong-model" } },
     })
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await events.waitForCount(1)
 
     await runHook(mock, "prompt", {
       sessionID: "ses_fallback",
@@ -634,6 +686,7 @@ describe("modelMode: V2 setup", () => {
       options: { ...FAST, modelMode: "session" },
       generate: () => '{"selected_memories":[]}',
     })
+    const events = trackProcessedEvents(mock)
     const { cleanup, claudeConfigDir } = await setupV2(mock)
     seedMemory(storeFor(mock.directory, claudeConfigDir), {
       fileName: "deploy",
@@ -646,13 +699,13 @@ describe("modelMode: V2 setup", () => {
       location: { directory: mock.directory },
       data: { sessionID: "ses_c", location: { directory: mock.directory }, model: createdModel },
     })
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await events.waitForCount(1)
 
     await runHook(mock, "prompt", { sessionID: "ses_c", messageID: "m1", prompt: { text: "how do we deploy?" } })
     await runHook(mock, "context", { sessionID: "ses_c", agent: "build", system: [] })
 
     mock.emit({ type: "session.deleted", data: { sessionID: "ses_c" } })
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await events.waitForCount(2)
 
     // After deletion (with no `session.get` model), reusing the session ID must not reuse the stale cache.
     await runHook(mock, "prompt", { sessionID: "ses_c", messageID: "m2", prompt: { text: "how do we deploy again?" } })

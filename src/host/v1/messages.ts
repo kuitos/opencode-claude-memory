@@ -34,7 +34,8 @@ export function extractLastV1Model(messages: readonly ChatMessage[]): V1ModelRef
     if (!info || typeof info !== "object") continue
     const fromModel = normalizeV1Model(info.model)
     if (fromModel) return fromModel
-    const fromFlat = normalizeV1Model(info)
+    // Pass only `providerID` and `modelID` explicitly so `info.id` (the message ID) is never misread as a model ID.
+    const fromFlat = normalizeV1Model({ providerID: info.providerID, modelID: info.modelID })
     if (fromFlat) return fromFlat
   }
   return undefined

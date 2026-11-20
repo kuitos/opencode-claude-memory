@@ -98,11 +98,10 @@ export class V2Host implements MemoryHost {
   // the caller's timeout (recall.timeoutMs).
   async generate(input: GenerateInput): Promise<string> {
     const result = await bounded("generate.text", input.timeoutMs, async () => {
-      const [agent, sessionModel] = await Promise.all([
-        this.agent(input.agent),
-        this.modelMode === "session" ? this.resolveSessionModel(input.parentSessionID) : Promise.resolve(undefined),
-      ])
-      const model = agent?.model ?? sessionModel
+      const agent = await this.agent(input.agent)
+      const model =
+        agent?.model ??
+        (this.modelMode === "session" ? await this.resolveSessionModel(input.parentSessionID) : undefined)
       return this.options.generateText({
         prompt: buildGeneratePrompt(input),
         ...(model ? { model } : {}),
@@ -167,11 +166,7 @@ export class V2Host implements MemoryHost {
     // so it is never passed through: the session ruleset is the sandbox followed by the agent's own
     // rules only. Without an explicit one the child would also inherit its parent's session rules.
     const sandbox = this.options.sandboxFor(input.agent)
-    const [agent, probe, sessionModel] = await Promise.all([
-      this.agent(input.agent),
-      this.agent(PERMISSIONS_PROBE_AGENT),
-      this.modelMode === "session" ? this.resolveSessionModel(input.parentSessionID) : Promise.resolve(undefined),
-    ])
+    const [agent, probe] = await Promise.all([this.agent(input.agent), this.agent(PERMISSIONS_PROBE_AGENT)])
     const { rules: permissions, own } = forkSessionRules(sandbox, agent?.permissions, probe?.permissions)
     if (!own && agent?.permissions) {
       this.options.log?.(
@@ -183,7 +178,8 @@ export class V2Host implements MemoryHost {
       )
     }
     this.options.log?.("debug", "Memory fork session permissions", { agent: input.agent, permissions })
-    const model = agent?.model ?? sessionModel
+    const model =
+      agent?.model ?? (this.modelMode === "session" ? await this.resolveSessionModel(input.parentSessionID) : undefined)
     return runV2Fork(this.options.session, {
       ...input,
       permissions,

@@ -148,16 +148,21 @@ export class V2SessionEvents {
       const directory = (data.location as { directory?: unknown } | undefined)?.directory ?? event.location?.directory
       if (directory === this.deps.directory && !data.parentID) {
         this.track(sessionID)
-        const model = normalizeModelRef(data.model)
-        if (model) this.deps.onSessionModel?.(sessionID, model)
+        if (this.deps.onSessionModel) {
+          const model = normalizeModelRef(data.model)
+          if (model) this.deps.onSessionModel(sessionID, model)
+        }
       }
       return
     }
     if (this.deps.owned.has(sessionID) || this.isIgnoredFork(sessionID)) return
     if (type === "session.model.selected") {
-      if (this.sessions.has(sessionID) || event.location?.directory === this.deps.directory) {
+      if (
+        this.deps.onSessionModel &&
+        (this.sessions.has(sessionID) || event.location?.directory === this.deps.directory)
+      ) {
         const model = normalizeModelRef(data.model)
-        if (model) this.deps.onSessionModel?.(sessionID, model)
+        if (model) this.deps.onSessionModel(sessionID, model)
       }
       return
     }
