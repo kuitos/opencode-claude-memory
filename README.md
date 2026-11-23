@@ -87,6 +87,7 @@ All behaviour is configured through OpenCode's own configuration. There are no `
       "extract":   { "enabled": true, "timeoutMs": 120000, "debounceMs": 10000, "maxConversationChars": 60000, "catchUpLimit": 5 },
       "autodream": { "enabled": true, "minHours": 24, "minSessions": 5, "timeoutMs": 300000 },
       "recall":    { "enabled": true, "waitMs": 1500, "timeoutMs": 30000, "maxMemories": 5 },
+      "saveGuard": { "enabled": true, "minBodyRetention": 0.5 },
       "readOnly":  false
     }]
   ],
@@ -103,6 +104,7 @@ All behaviour is configured through OpenCode's own configuration. There are no `
 - The three agents are registered hidden with a memory-only tool sandbox. On 1.x, override any field (`model`, `steps`, `temperature`, …) under `agent.<name>`; the plugin fills in the rest.
 - `CLAUDE_CONFIG_DIR` is honoured exactly like Claude Code does, and is the only environment variable the plugin reads.
 - `readOnly: true` prevents this plugin from writing to the Claude config directory: no `memory_save` / `memory_delete`, no extraction or auto-dream (whatever `extract` / `autodream` say), no plugin state or log writes, and the memory folder is not created. The index, recall and `memory_list` / `memory_search` / `memory_read` keep working, and the prompt tells the model the memory is read-only.
+- `saveGuard` protects existing memories from wholesale compaction. A `memory_save` that would replace an existing memory's body with less than `minBodyRetention` (default 0.5) of its current size is **held**: nothing is written, the existing memory is unchanged, and the rejected draft is kept under `<stateDir>/held/`. The save goes through when it carries a `merge_justification` (a deliberate merge or correction), and a merged update that keeps enough of the body needs none. Every overwrite also keeps a copy of the previous content in the trash (`<stateDir>/trash/`), exactly as `memory_delete` does, so a replaced body can always be recovered.
 - This option does not restrict the host's shell or file-editing tools, or other plugins. To enforce read-only access for the entire host, also configure host permissions or filesystem access controls; the memory prompt alone does not enforce it.
 
 ```jsonc

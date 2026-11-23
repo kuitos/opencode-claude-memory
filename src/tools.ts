@@ -123,6 +123,13 @@ export function buildMemoryToolSpecs(
             "Memory content. For feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines when they are known (never as placeholders). " +
               'Write a relative date the user did not pin down ("last week") as they said it, anchored to today (e.g. "last week, as of 2026-03-05"); never estimate a date',
           ),
+        merge_justification: z
+          .string()
+          .optional()
+          .describe(
+            "Only for updates that replace an existing memory with a much smaller body: why the old content is being replaced (e.g. the merge performed, or the correction being made). " +
+              "An unexplained drastic shrink is held, not saved; merging the existing content into the new save needs no justification",
+          ),
       },
       async execute(args, ctx) {
         const type = str(args, "type") as MemoryType
@@ -133,6 +140,7 @@ export function buildMemoryToolSpecs(
           type,
           content: str(args, "content"),
           ...(str(args, "title").trim() ? { title: str(args, "title") } : {}),
+          ...(str(args, "merge_justification").trim() ? { mergeJustification: str(args, "merge_justification") } : {}),
         })
         const savedThisRun = extraction.recordSave(ctx.sessionID, outcome.fileName)
         return {

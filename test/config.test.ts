@@ -21,6 +21,7 @@ describe("parseConfig", () => {
     })
     expect(config.autodream).toEqual({ enabled: true, minHours: 24, minSessions: 5, timeoutMs: 300_000 })
     expect(config.recall).toEqual({ enabled: true, waitMs: 1_500, timeoutMs: 30_000, maxMemories: 5 })
+    expect(config.saveGuard).toEqual({ enabled: true, minBodyRetention: 0.5 })
     expect(config.agents).toBe(MEMORY_AGENTS)
     expect(config.claudeConfigDir).toBe(join(homedir(), ".claude"))
   })
@@ -48,6 +49,8 @@ describe("parseConfig", () => {
     expect(() => parseConfig({ extract: { timeoutMs: 2_147_483_648 } }, {})).toThrow(/extract\.timeoutMs/)
     expect(() => parseConfig({ recall: { maxMemories: 21 } }, {})).toThrow(/recall\.maxMemories/)
     expect(() => parseConfig({ autodream: { minSessions: 0 } }, {})).toThrow(/autodream\.minSessions/)
+    expect(() => parseConfig({ saveGuard: { minBodyRetention: 0 } }, {})).toThrow(/saveGuard\.minBodyRetention/)
+    expect(() => parseConfig({ saveGuard: { minBodyRetention: 1.5 } }, {})).toThrow(/saveGuard\.minBodyRetention/)
   })
 
   test("only reads CLAUDE_CONFIG_DIR from the environment", () => {

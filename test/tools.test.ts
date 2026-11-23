@@ -183,7 +183,10 @@ describe("buildMemoryTools", () => {
     const plain = await tools.memory_save?.execute(saveArgs, toolCtx({ sessionID: "main" }))
     expect(resultOutput(plain as never)).not.toContain("Saved so far in this extraction run")
 
-    const fork = await tools.memory_save?.execute({ ...saveArgs, content: "changed" }, toolCtx({ sessionID: "fork" }))
+    const fork = await tools.memory_save?.execute(
+      { ...saveArgs, content: "Used to validate the completed tool title in end-to-end flow. Changed." },
+      toolCtx({ sessionID: "fork" }),
+    )
     expect(resultOutput(fork as never)).toContain(
       "Saved so far in this extraction run (2): earlier.md, title_verification.md",
     )
