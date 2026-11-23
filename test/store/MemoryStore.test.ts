@@ -3,6 +3,7 @@ import { createHash } from "node:crypto"
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -14,7 +15,7 @@ import {
 import { join } from "node:path"
 import { MaintenanceLock } from "../../src/extraction/lock.js"
 import { ExtractionStateStore } from "../../src/extraction/state.js"
-import { MemoryStore } from "../../src/store/MemoryStore.js"
+import { MemorySaveHeldError, MemoryStore } from "../../src/store/MemoryStore.js"
 import * as paths from "../../src/store/paths.js"
 import { sanitizePath } from "../../src/store/paths.js"
 import {
@@ -905,5 +906,100 @@ describe("MemoryStore provenance (shared folders)", () => {
       /frontmatter would exceed/,
     )
     expect(readFileSync(filePath, "utf-8")).toBe(original)
+  })
+})
+
+describe("MemoryStore save guard (shrink gate + trash-on-overwrite)", () => {
+  // No trailing newline: save() trims the body, so the stored body equals this string exactly.
+  const longBody = "line of detail\n".repeat(20).trim()
+  const guardStore = (saveGuard?: { enabled: boolean; minBodyRetention: number }) =>
+    new MemoryStore(tempGitRepo(), {
+      claudeConfigDir: tempDir("ocm-claude-"),
+      ...(saveGuard ? { saveGuard } : {}),
+    })
+
+  test("holds an unexplained drastic shrink, keeps the existing memory and the rejected draft", () => {
+    const store = guardStore()
+    store.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: longBody })
+    let held: MemorySaveHeldError | undefined
+    try {
+      store.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: "summary" })
+    } catch (error) {
+      held = error as MemorySaveHeldError
+    }
+    expect(held).toBeInstanceOf(MemorySaveHeldError)
+    expect(held?.fileName).toBe("dense.md")
+    expect(held?.heldTo).toMatch(/held[/\\][^/\\]+[/\\]dense\.md$/)
+    expect(readFileSync(held?.heldTo as string, "utf-8")).toContain("summary")
+    // the existing memory is untouched
+    expect(store.read("dense")?.body).toBe(longBody)
+  })
+
+  test("a merge justification goes through", () => {
+    const store = guardStore()
+    store.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: longBody })
+    const result = store.save({
+      fileName: "dense",
+      name: "dense",
+      description: "d",
+      type: "project",
+      content: "summary",
+      mergeJustification: "old content was wrong; corrected after verification",
+    })
+    expect(result.unchanged).toBe(false)
+    expect(store.read("dense")?.body).toBe("summary")
+  })
+
+  test("a merged update that keeps enough of the body needs no justification", () => {
+    const store = guardStore()
+    store.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: longBody })
+    const merged = `${longBody}\nplus a new line`
+    expect(
+      store.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: merged }).unchanged,
+    ).toBe(false)
+    expect(store.read("dense")?.body).toBe(merged)
+  })
+
+  test("every overwrite keeps the previous content in the trash", () => {
+    const store = guardStore()
+    store.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: longBody })
+    store.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: `${longBody}\nmore` })
+    const trashDir = join(store.stateDir, "trash")
+    const stamps = readdirSync(trashDir)
+    expect(stamps.length).toBe(1)
+    expect(readFileSync(join(trashDir, stamps[0] as string, "dense.md"), "utf-8")).toContain(longBody)
+  })
+
+  test("the gate can be disabled or tuned via saveGuard", () => {
+    const off = guardStore({ enabled: false, minBodyRetention: 0.5 })
+    off.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: longBody })
+    expect(
+      off.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: "summary" }).unchanged,
+    ).toBe(false)
+    expect(off.read("dense")?.body).toBe("summary")
+
+    const strict = guardStore({ enabled: true, minBodyRetention: 1 })
+    strict.save({ fileName: "dense", name: "dense", description: "d", type: "project", content: longBody })
+    expect(() =>
+      strict.save({
+        fileName: "dense",
+        name: "dense",
+        description: "d",
+        type: "project",
+        content: longBody.slice(0, -1),
+      }),
+    ).toThrow(MemorySaveHeldError)
+  })
+
+  test("a new memory and a frontmatter-only file never trip the gate", () => {
+    const store = guardStore()
+    expect(store.save({ fileName: "new", name: "new", description: "d", type: "user", content: "x" }).unchanged).toBe(
+      false,
+    )
+    writeRawMemory(store.memoryDir, "empty.md", "---\nname: empty\ndescription: d\nmetadata:\n  type: user\n---\n\n")
+    expect(
+      store.save({ fileName: "empty", name: "empty", description: "d", type: "user", content: "now it has a body" })
+        .unchanged,
+    ).toBe(false)
   })
 })

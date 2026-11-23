@@ -47,6 +47,18 @@ export const MemoryOptionsSchema = z
     // folder is not created. Recall and memory_list / memory_search / memory_read keep working. For
     // hosts that may read what Claude Code remembers but must not add to it.
     readOnly: z.boolean().default(false),
+    // Guards memory_save against wholesale compaction: an update that would replace an existing
+    // memory's body with less than `minBodyRetention` of its current size is held (nothing written,
+    // the rejected draft kept under <stateDir>/held/) unless the save carries a merge justification.
+    // Every overwrite also keeps a copy of the previous content in the trash, like delete does.
+    saveGuard: z
+      .object({
+        enabled: z.boolean().default(true),
+        // Minimum fraction of the existing body's byte length an update must keep (0 < r ≤ 1).
+        minBodyRetention: z.number().positive().max(1).default(0.5),
+      })
+      .strict()
+      .default({}),
   })
   .strict()
 

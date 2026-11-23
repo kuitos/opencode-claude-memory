@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto"
-import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "node:fs"
+import { cpSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs"
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
 import { writeFileAtomicSync } from "../util/exclusiveFile.js"
 import { resolveAutoMemoryDirectory } from "./autoMemoryDirectory.js"
@@ -48,6 +48,9 @@ export type SaveMemoryInput = {
   // Title of the memory's MEMORY.md line (`- [Title](file.md) — description`); defaults to `name`.
   // Never stored in the file, so it only changes a line this plugin generated (see indexAfterSave).
   title?: string
+  // Why this save replaces an existing memory with a much smaller body (see saveGuard): the merge
+  // or correction being made. Absent on new memories; ignored unless the shrink gate triggers.
+  mergeJustification?: string
 }
 
 export type SaveMemoryResult = {
@@ -96,6 +99,8 @@ export type MemoryStoreOptions = {
   readOnly?: boolean
   // Clock for the `modified` stamp; injectable for tests.
   now?: () => Date
+  // Shrink gate + trash-on-overwrite for save (see config `saveGuard`); defaults to enabled.
+  saveGuard?: { enabled: boolean; minBodyRetention: number }
 }
 
 // Owns the resolved memory paths for one project. Path resolution (git root, worktree canonical
@@ -115,6 +120,7 @@ export class MemoryStore {
   // Shared by every project targeting this memory directory; watermarks stay project-scoped.
   readonly maintenanceLockPath: string
   readonly readOnly: boolean
+  readonly saveGuard: { enabled: boolean; minBodyRetention: number }
   private readonly now: () => Date
 
   constructor(memoryRoot: string, options: MemoryStoreOptions) {
@@ -123,6 +129,7 @@ export class MemoryStore {
     this.canonicalRoot = findCanonicalGitRoot(memoryRoot) ?? memoryRoot
     this.claudeConfigDir = options.claudeConfigDir
     this.readOnly = options.readOnly ?? false
+    this.saveGuard = options.saveGuard ?? { enabled: true, minBodyRetention: 0.5 }
     this.now = options.now ?? (() => new Date())
     const projectKey = sanitizePath(this.canonicalRoot)
     this.projectDir = join(this.claudeConfigDir, "projects", projectKey)
@@ -214,6 +221,28 @@ export class MemoryStore {
       )
     }
 
+    // The shrink gate: an update that would replace an existing memory's body with a small fraction
+    // of its current size is held — nothing is written, the rejected draft is kept under
+    // <stateDir>/held/ — unless the save says why (mergeJustification). Compaction-style rewrites
+    // that drop tables and detail are exactly how a summarising model destroys a dense memory; a
+    // deliberate merge or correction can say so and goes through.
+    if (parsed !== null && this.saveGuard.enabled && isDrasticShrink(parsed, input, this.saveGuard.minBodyRetention)) {
+      const justification = input.mergeJustification?.trim()
+      if (!justification) {
+        const heldTo = this.holdRejectedDraft(relativePath, fileContent)
+        throw new MemorySaveHeldError(relativePath, heldTo, this.saveGuard.minBodyRetention)
+      }
+    }
+
+    // Every overwrite keeps a copy of the previous content in the trash, exactly as delete does, so
+    // a save that replaces a body can always be undone from <stateDir>/trash/.
+    if (existing !== null) {
+      const stamp = this.now().toISOString().replace(/[:.]/g, "-")
+      const trashedTo = join(this.stateDir, "trash", stamp, relativePath)
+      mkdirSync(dirname(trashedTo), { recursive: true })
+      cpSync(filePath, trashedTo, { preserveTimestamps: true })
+    }
+
     writeFileAtomicSync(filePath, fileContent)
     if (nextIndex !== index) this.writeIndex(nextIndex)
 
@@ -264,10 +293,49 @@ export class MemoryStore {
     writeFileAtomicSync(this.entrypoint, content)
   }
 
+  // Keeps a rejected compaction draft under <stateDir>/held/<timestamp>/ so the caller (or the
+  // user) can see exactly what the gate refused to write. Best-effort: a state directory that
+  // cannot be written must not turn a held save into a crash.
+  private holdRejectedDraft(relativePath: string, draft: string): string | null {
+    const stamp = this.now().toISOString().replace(/[:.]/g, "-")
+    const heldTo = join(this.stateDir, "held", stamp, relativePath)
+    try {
+      mkdirSync(dirname(heldTo), { recursive: true })
+      writeFileSync(heldTo, draft)
+      return heldTo
+    } catch {
+      return null
+    }
+  }
+
   // Defence in depth: in read-only mode nothing registers a writing tool or runs a writing fork, so
   // reaching this is a bug, and it must fail rather than touch Claude Code's files.
   private assertWritable(): void {
     if (this.readOnly) throw new Error("Memory is read-only (readOnly: true)")
+  }
+}
+
+// A save the shrink gate refused: the existing memory is untouched, and the rejected draft was kept
+// (when the state directory allowed it) so the merge can be redone deliberately. The message is the
+// actionable contract: it tells the caller exactly how to proceed.
+export class MemorySaveHeldError extends Error {
+  readonly fileName: string
+  readonly heldTo: string | null
+  readonly minBodyRetention: number
+
+  constructor(fileName: string, heldTo: string | null, minBodyRetention: number) {
+    super(
+      `Memory "${fileName}" was NOT saved: the new body is under ${Math.round(minBodyRetention * 100)}% of the ` +
+        `existing memory's size, which looks like a compaction that would lose information. ` +
+        "The existing memory is unchanged. " +
+        "To merge instead, memory_read the file, keep its content, and re-save the merged result " +
+        "(passing merge_justification only when you deliberately replace it). " +
+        (heldTo ? `The rejected draft was kept at ${heldTo}.` : ""),
+    )
+    this.name = "MemorySaveHeldError"
+    this.fileName = fileName
+    this.heldTo = heldTo
+    this.minBodyRetention = minBodyRetention
   }
 }
 
@@ -291,6 +359,17 @@ function isUnchanged(parsed: ParsedMemoryFile, relativePath: string, input: Save
     (parseMemoryType(parsed.frontmatter.type) ?? "user") === input.type &&
     parsed.body.replace(/\r\n/g, "\n") === input.content.trim().replace(/\r\n/g, "\n")
   )
+}
+
+// The shrink gate's test: an update whose new body would keep less than `minRetention` of the
+// existing body's bytes. Bodies, not whole files, so a frontmatter edit never trips the gate; an
+// empty existing body (a frontmatter-only file) never trips it either — there is nothing to lose.
+function isDrasticShrink(parsed: ParsedMemoryFile, input: SaveMemoryInput, minRetention: number): boolean {
+  if (!parsed.hasFrontmatter) return false
+  const before = Buffer.byteLength(parsed.body, "utf-8")
+  if (before === 0) return false
+  const after = Buffer.byteLength(input.content.trim(), "utf-8")
+  return after < before * minRetention
 }
 
 // MEMORY.md after a save. Index lines are often hand-written (Claude Code's format is

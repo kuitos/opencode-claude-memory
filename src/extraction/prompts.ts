@@ -40,7 +40,7 @@ For each memory worth saving, call \`memory_save\` with:
 ## Instructions
 
 1. Analyze the conversation for memorable information
-2. The existing memories are listed below — do not duplicate them. To update one, call \`memory_read\` first and re-save it under the same \`file_name\` with the merged content
+2. The existing memories are listed below — do not duplicate them. To update one, call \`memory_read\` first and re-save it under the same \`file_name\` with the merged content. Merge, never replace: the new content must keep the existing memory's information (add to it, correct it, restructure it), not summarise it away. An unexplained save that shrinks a memory drastically is held, not written; if you really are replacing it (the old content is wrong), pass \`merge_justification\` saying why.
 3. Only touch an existing memory when this conversation adds information about that memory's own subject. Never edit memories about unrelated topics, never append notes about what you could not find or verify, and keep a memory's name and description unless the new content makes them wrong.
 4. Memories listed under "${SAVED_DURING_CONVERSATION_TITLE}" (when that list is present) were already written while this conversation ran (usually by the main agent): do not create another memory covering the same thing, and leave them alone unless the transcript contains information they are missing.
 5. Save each distinct memory as a separate entry
@@ -106,7 +106,7 @@ Goal: tighten and de-duplicate memory files so future sessions can orient faster
 2. Identify duplicate entries (two memories about the same fact) and entries that are clearly obsolete.
 
 ## Phase 2 — Consolidate
-1. Merge duplicates into a single memory using memory_save, then delete the redundant file with memory_delete.
+1. Merge duplicates into a single memory using memory_save, then delete the redundant file with memory_delete. A merge keeps the information of every memory it combines; it never replaces a body with a summary of it. An unexplained save that shrinks a memory drastically is held, not written; if you really are replacing it (the old content is wrong), pass \`merge_justification\` saying why.
 2. Leave every other memory as it is. Do not reword names or descriptions for style or retrieval: change a description only when you changed the memory's content, or when it is genuinely misleading about what the memory says.
 3. Do not restructure content that is already understandable. Never add **Why:** / **How to apply:** lines, or any other placeholder, unless the memory itself states the reason or how to apply it; never write lines such as "not recorded" or "unknown".
 
